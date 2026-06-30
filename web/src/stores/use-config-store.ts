@@ -45,6 +45,7 @@ export type AiConfig = {
     size: string;
     count: string;
     canvasImageCount: string;
+    apipodModelSeedVersion: string;
 };
 
 export type WebdavSyncConfig = {
@@ -61,6 +62,83 @@ export type ModelCapability = "image" | "video" | "text" | "audio";
 const CHANNEL_MODEL_SEPARATOR = "::";
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
+const APIPOD_MODEL_SEED_VERSION = "2026-07-01";
+// APIPod does not expose every multimodal model through /v1/models, so keep this local seed list for the config UI.
+const APIPOD_KNOWN_MODELS = [
+    "gpt-image-2",
+    "gpt-image-2-edit",
+    "nano-banana-2",
+    "nano-banana-pro",
+    "seedream-v4.5",
+    "seedream-v4.5-edit",
+    "seedream-5.0-lite",
+    "seedream-5.0-lite-edit",
+    "wan2.7-image",
+    "wan2.7-image-edit",
+    "wan2.7-image-pro",
+    "wan2.7-image-pro-edit",
+    "seedance-2.0-t2v",
+    "seedance-2.0-i2v",
+    "seedance-2.0-r2v",
+    "seedance-2.0-fast-t2v",
+    "seedance-2.0-fast-i2v",
+    "seedance-2.0-fast-r2v",
+    "seedance-1.5-pro-t2v",
+    "seedance-1.5-pro-i2v",
+    "seedance-1.0-lite-t2v",
+    "seedance-1.0-lite-i2v",
+    "seedance-1.0-lite-i2v-ref",
+    "seedance-1.0-pro-t2v",
+    "seedance-1.0-pro-i2v",
+    "seedance-1.0-pro-fast-t2v",
+    "seedance-1.0-pro-fast-i2v",
+    "grok-imagine-t2v",
+    "grok-imagine-i2v",
+    "grok-imagine-1.5-preview",
+    "sora-2",
+    "sora-2-pro",
+    "sora-2-vip",
+    "veo3-1-fast",
+    "veo3-1-fast-4k",
+    "veo3-1-fast-ref",
+    "veo3-1-quality",
+    "veo3-1-quality-4k",
+    "gemini-omni-t2v",
+    "gemini-omni-i2v",
+    "gemini-omni-r2v",
+    "gemini-omni-extend",
+    "wan2.7-t2v",
+    "wan2.7-i2v",
+    "wan2.7-videoedit",
+    "kling-2.6-motion-control",
+    "claude-haiku-4-5",
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-sonnet-4-5",
+    "claude-sonnet-4-6",
+    "gemini-3-pro-preview",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-3.1-pro-preview",
+    "gemini-3.5-flash",
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-5",
+    "gpt-5-mini",
+    "gpt-5-nano",
+    "gpt-5.1",
+    "gpt-5.2",
+    "gpt-5.2-chat",
+    "gpt-5.3-codex",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.4-nano",
+    "gpt-5.4-pro",
+    "grok-4.20-multi-agent",
+    "grok-4.20-non-reasoning",
+    "grok-4.20-reasoning",
+    "gpt-4o-mini-tts",
+];
 
 export const defaultConfig: AiConfig = {
     channelMode: "local",
@@ -100,6 +178,7 @@ export const defaultConfig: AiConfig = {
     size: "1:1",
     count: "1",
     canvasImageCount: "3",
+    apipodModelSeedVersion: "",
 };
 
 export const defaultWebdavSyncConfig: WebdavSyncConfig = {
@@ -127,12 +206,38 @@ type ConfigStore = {
 function isVideoModelName(model: string) {
     const value = modelOptionName(model).toLowerCase();
     if (value.includes("wan") && value.includes("image")) return false;
-    return value.includes("seedance") || value.includes("video") || value.includes("sora") || value.includes("veo") || value.includes("kling") || value.includes("hailuo") || value.includes("grok-imagine") || value.includes("gemini-omni") || value.includes("t2v") || value.includes("i2v") || value.includes("r2v");
+    return (
+        value.includes("seedance") ||
+        value.includes("video") ||
+        value.includes("sora") ||
+        value.includes("veo") ||
+        value.includes("kling") ||
+        value.includes("hailuo") ||
+        value.includes("grok-imagine") ||
+        value.includes("gemini-omni") ||
+        value.includes("t2v") ||
+        value.includes("i2v") ||
+        value.includes("r2v")
+    );
 }
 
 function isImageModelName(model: string) {
     const value = modelOptionName(model).toLowerCase();
-    return !isVideoModelName(model) && !isAudioModelName(model) && (value.includes("seedream") || value.includes("gpt-image") || value.includes("image") || value.includes("dall-e") || value.includes("dalle") || value.includes("imagen") || value.includes("flux") || value.includes("sdxl") || value.includes("stable-diffusion") || value.includes("midjourney") || value.includes("nano-banana"));
+    return (
+        !isVideoModelName(model) &&
+        !isAudioModelName(model) &&
+        (value.includes("seedream") ||
+            value.includes("gpt-image") ||
+            value.includes("image") ||
+            value.includes("dall-e") ||
+            value.includes("dalle") ||
+            value.includes("imagen") ||
+            value.includes("flux") ||
+            value.includes("sdxl") ||
+            value.includes("stable-diffusion") ||
+            value.includes("midjourney") ||
+            value.includes("nano-banana"))
+    );
 }
 
 function isAudioModelName(model: string) {
@@ -207,6 +312,11 @@ export const useConfigStore = create<ConfigStore>()(
                 if (!Array.isArray(persistedConfig.channels)) config.channels = [];
                 const channels = normalizeChannels(config);
                 const models = modelOptionsFromChannels(channels);
+                const shouldSeedApipodModelOptions = config.apipodModelSeedVersion !== APIPOD_MODEL_SEED_VERSION && channels.some(isApipodChannel);
+                const imageModels = withSeededApipodModelOptions(Array.isArray(persistedConfig.imageModels) ? config.imageModels : filterModelsByCapability(models, "image"), channels, "image", shouldSeedApipodModelOptions);
+                const videoModels = withSeededApipodModelOptions(Array.isArray(persistedConfig.videoModels) ? config.videoModels : filterModelsByCapability(models, "video"), channels, "video", shouldSeedApipodModelOptions);
+                const textModels = withSeededApipodModelOptions(Array.isArray(persistedConfig.textModels) ? config.textModels : filterModelsByCapability(models, "text"), channels, "text", shouldSeedApipodModelOptions);
+                const audioModels = withSeededApipodModelOptions(Array.isArray(persistedConfig.audioModels) ? config.audioModels : filterModelsByCapability(models, "audio"), channels, "audio", shouldSeedApipodModelOptions);
                 return {
                     ...current,
                     webdav: { ...defaultWebdavSyncConfig, ...persistedWebdav },
@@ -229,10 +339,11 @@ export const useConfigStore = create<ConfigStore>()(
                         videoGenerateAudio: config.videoGenerateAudio || "true",
                         videoWatermark: config.videoWatermark || "false",
                         canvasImageCount: config.canvasImageCount || "3",
-                        imageModels: Array.isArray(persistedConfig.imageModels) ? normalizeModelList(config.imageModels, channels) : filterModelsByCapability(models, "image"),
-                        videoModels: Array.isArray(persistedConfig.videoModels) ? normalizeModelList(config.videoModels, channels) : filterModelsByCapability(models, "video"),
-                        textModels: Array.isArray(persistedConfig.textModels) ? normalizeModelList(config.textModels, channels) : filterModelsByCapability(models, "text"),
-                        audioModels: Array.isArray(persistedConfig.audioModels) ? normalizeModelList(config.audioModels, channels) : filterModelsByCapability(models, "audio"),
+                        imageModels,
+                        videoModels,
+                        textModels,
+                        audioModels,
+                        apipodModelSeedVersion: shouldSeedApipodModelOptions ? APIPOD_MODEL_SEED_VERSION : config.apipodModelSeedVersion || "",
                     },
                 };
             },
@@ -245,6 +356,16 @@ function normalizeModelList(models: string[], channels: ModelChannel[]) {
     return Array.from(new Set((models || []).map((model) => model.trim()).filter(Boolean)))
         .map((model) => normalizeModelOptionValue(model, channels))
         .filter((model) => !allModelOptions.length || allModelOptions.includes(model) || !isChannelModelValue(model));
+}
+
+function withSeededApipodModelOptions(models: string[], channels: ModelChannel[], capability: ModelCapability, shouldSeed: boolean) {
+    const normalized = normalizeModelList(models, channels);
+    if (!shouldSeed) return normalized;
+    const apipodOptions = filterModelsByCapability(
+        channels.filter(isApipodChannel).flatMap((channel) => channel.models.map((model) => encodeChannelModel(channel.id, model))),
+        capability,
+    );
+    return uniqueModelOptions([...normalized, ...apipodOptions]);
 }
 
 export function useEffectiveConfig() {
@@ -301,8 +422,8 @@ export function normalizeModelOptionValue(value: string | undefined, channels: M
         const channel = channels.find((item) => item.id === decoded.channelId);
         return channel && channel.models.includes(decoded.model) ? model : "";
     }
-    const channel = channels.find((item) => item.models.includes(decoded?.model || model)) || channels[0];
-    return channel && channel.models.includes(decoded?.model || model) ? encodeChannelModel(channel.id, decoded?.model || model) : model;
+    const channel = channels.find((item) => item.models.includes(model)) || channels[0];
+    return channel && channel.models.includes(model) ? encodeChannelModel(channel.id, model) : model;
 }
 
 export function resolveModelChannel(config: AiConfig, value: string) {
@@ -324,13 +445,14 @@ export function resolveModelRequestConfig(config: AiConfig, value: string) {
 }
 
 function normalizeChannels(config: AiConfig) {
+    const shouldSeedApipodModels = config.apipodModelSeedVersion !== APIPOD_MODEL_SEED_VERSION;
     const persistedChannels = Array.isArray(config.channels) ? config.channels : [];
     const channels = persistedChannels.map((channel, index) =>
         createModelChannel({
             ...channel,
             id: channel.id || (index === 0 ? "default" : `channel-${index + 1}`),
             name: channel.name || (index === 0 ? "默认渠道" : `渠道 ${index + 1}`),
-            models: uniqueRawModels(channel.models || []),
+            models: uniqueRawModels([...(channel.models || []), ...(shouldSeedApipodModels && isApipodChannel(channel) ? APIPOD_KNOWN_MODELS : [])]),
         }),
     );
     if (!channels.length) {
@@ -341,14 +463,7 @@ function normalizeChannels(config: AiConfig) {
                 baseUrl: config.baseUrl || defaultConfig.baseUrl,
                 apiKey: config.apiKey || "",
                 apiFormat: config.apiFormat || defaultConfig.apiFormat,
-                models: uniqueRawModels([
-                    ...(config.models || []),
-                    config.model,
-                    config.imageModel,
-                    config.videoModel,
-                    config.textModel,
-                    config.audioModel,
-                ]),
+                models: uniqueRawModels([...(config.models || []), config.model, config.imageModel, config.videoModel, config.textModel, config.audioModel]),
             }),
         );
     }
@@ -361,6 +476,11 @@ export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {
 
 function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
     return apiFormat === "gemini" ? "gemini" : "openai";
+}
+
+function isApipodChannel(channel: Partial<ModelChannel>) {
+    const marker = `${channel.id || ""} ${channel.name || ""} ${channel.baseUrl || ""}`.toLowerCase();
+    return marker.includes("apipod") || marker.includes("api.apipod.ai") || marker.includes("apipod-proxy");
 }
 
 function uniqueRawModels(models: string[]) {
