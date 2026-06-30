@@ -67,10 +67,19 @@ type ResponseApiPayload = {
 type ResponseStreamState = { buffer: string; text: string; payload?: ResponseApiPayload; error?: string };
 
 type ImageApiResponse = {
-    data?: Array<Record<string, unknown>>;
+    data?: Array<Record<string, unknown>> | ImageTaskData;
     error?: { message?: string };
     code?: number;
     msg?: string;
+    message?: string;
+};
+type ImageTaskData = {
+    task_id?: string;
+    status?: "pending" | "processing" | "completed" | "failed" | "cancelled";
+    result?: Array<string | Record<string, unknown>>;
+    error?: string | { message?: string };
+    code?: number;
+    message?: string;
 };
 type GeminiPart = {
     text?: string;
@@ -191,9 +200,8 @@ function resolveImageDataUrl(item: Record<string, unknown>) {
 }
 
 function parseImagePayload(payload: ImageApiResponse) {
-    if (typeof payload.code === "number" && payload.code !== 0) {
-        throw new Error(payload.msg || "请求失败");
-    }
+    validateImagePayload(payload);
+    if (!Array.isArray(payload.data)) throw new Error("接口没有返回图片");
     const images =
         payload.data
             ?.map(resolveImageDataUrl)
@@ -207,11 +215,64 @@ function parseImagePayload(payload: ImageApiResponse) {
     return images;
 }
 
+async function resolveImagePayload(config: AiConfig, payload: ImageApiResponse, options?: RequestOptions) {
+    validateImagePayload(payload);
+    const task = taskData(payload.data);
+    if (task?.task_id) return pollImageTask(config, task.task_id, options, task);
+    return parseImagePayload(payload);
+}
+
+function validateImagePayload(payload: ImageApiResponse) {
+    if (typeof payload.code === "number" && payload.code !== 0 && payload.code !== 200) {
+        throw new Error(payload.msg || payload.message || "请求失败");
+    }
+    if (payload.error?.message) throw new Error(payload.error.message);
+}
+
+function taskData(value: ImageApiResponse["data"]) {
+    return value && !Array.isArray(value) ? value : null;
+}
+
+async function pollImageTask(config: AiConfig, taskId: string, options?: RequestOptions, initialTask?: ImageTaskData) {
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+        if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        const task = attempt === 0 && initialTask?.status ? initialTask : await queryImageTask(config, taskId, options);
+        if (task.status === "completed") return imageTaskResults(task);
+        if (task.status === "failed" || task.status === "cancelled") throw new Error(imageTaskError(task, task.status === "cancelled" ? "图片生成已取消" : "图片生成失败"));
+        await delay(attempt < 12 ? 2500 : 5000, options?.signal);
+    }
+    throw new Error("图片生成超时，请稍后重试");
+}
+
+async function queryImageTask(config: AiConfig, taskId: string, options?: RequestOptions) {
+    const response = await axios.get<ImageApiResponse>(aiApiUrl(config, `/images/status/${encodeURIComponent(taskId)}`), { headers: aiHeaders(config), signal: options?.signal });
+    validateImagePayload(response.data);
+    const task = taskData(response.data.data);
+    if (!task) throw new Error("图片任务查询没有返回状态");
+    return task;
+}
+
+function imageTaskResults(task: ImageTaskData) {
+    const images =
+        task.result
+            ?.map((item) => (typeof item === "string" ? item : resolveImageDataUrl(item)))
+            .filter((value): value is string => Boolean(value))
+            .map((dataUrl) => ({ id: nanoid(), dataUrl })) || [];
+    if (!images.length) throw new Error("图片任务完成但没有返回图片");
+    return images;
+}
+
+function imageTaskError(task: ImageTaskData, fallback: string) {
+    if (typeof task.error === "string" && task.error) return task.error;
+    if (task.error && typeof task.error === "object" && task.error.message) return task.error.message;
+    return task.message || fallback;
+}
+
 function readAxiosError(error: unknown, fallback: string) {
     if (axios.isCancel(error)) return "请求已取消";
-    if (axios.isAxiosError<{ error?: { message?: string }; msg?: string; code?: number }>(error)) {
+    if (axios.isAxiosError<{ error?: { message?: string }; msg?: string; message?: string; code?: number }>(error)) {
         const responseData = error.response?.data;
-        return responseData?.msg || responseData?.error?.message || readStatusError(error.response?.status, fallback);
+        return responseData?.msg || responseData?.message || responseData?.error?.message || readStatusError(error.response?.status, fallback);
     }
     if (error instanceof DOMException && error.name === "AbortError") return "请求已取消";
     return error instanceof Error ? error.message : fallback;
@@ -226,6 +287,24 @@ function readStatusError(status: number | undefined, fallback: string) {
 function withSystemPrompt(config: AiConfig, prompt: string) {
     const systemPrompt = config.systemPrompt.trim();
     return systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt;
+}
+
+function delay(ms: number, signal?: AbortSignal) {
+    return new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) {
+            reject(new DOMException("Aborted", "AbortError"));
+            return;
+        }
+        const timer = setTimeout(resolve, ms);
+        signal?.addEventListener(
+            "abort",
+            () => {
+                clearTimeout(timer);
+                reject(new DOMException("Aborted", "AbortError"));
+            },
+            { once: true },
+        );
+    });
 }
 
 function aiApiUrl(config: AiConfig, path: string) {
@@ -636,7 +715,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
                 signal: options?.signal,
             },
         );
-        const images = parseImagePayload(response.data);
+        const images = await resolveImagePayload(requestConfig, response.data, options);
         return images;
     } catch (error) {
         throw new Error(readAxiosError(error, "请求失败"));
@@ -675,7 +754,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
 
     try {
         const response = await axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/edits"), formData, { headers: aiHeaders(requestConfig), signal: options?.signal });
-        const images = parseImagePayload(response.data);
+        const images = await resolveImagePayload(requestConfig, response.data, options);
         return images;
     } catch (error) {
         throw new Error(readAxiosError(error, "请求失败"));
