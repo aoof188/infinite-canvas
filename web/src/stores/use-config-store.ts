@@ -46,6 +46,7 @@ export type AiConfig = {
     count: string;
     canvasImageCount: string;
     apipodModelSeedVersion: string;
+    arkModelSeedVersion: string;
 };
 
 export type WebdavSyncConfig = {
@@ -62,7 +63,10 @@ export type ModelCapability = "image" | "video" | "text" | "audio";
 const CHANNEL_MODEL_SEPARATOR = "::";
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
+const VOLCENGINE_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
+const VOLCENGINE_ARK_PLAN_BASE_URL = "https://ark.cn-beijing.volces.com/api/plan/v3";
 const APIPOD_MODEL_SEED_VERSION = "2026-07-01";
+const ARK_MODEL_SEED_VERSION = "2026-07-01";
 // APIPod does not expose every multimodal model through /v1/models, so keep this local seed list for the config UI.
 const APIPOD_KNOWN_MODELS = [
     "gpt-image-2",
@@ -139,22 +143,59 @@ const APIPOD_KNOWN_MODELS = [
     "grok-4.20-reasoning",
     "gpt-4o-mini-tts",
 ];
+const ARK_KNOWN_MODELS = [
+    "doubao-seed-2-0-pro-260215",
+    "doubao-seed-2-0-lite-260428",
+    "doubao-seed-1-6-251015",
+    "doubao-seed-1-6-thinking-251015",
+    "doubao-seedream-5-0-260128",
+    "doubao-seedream-5-0-lite-260128",
+    "doubao-seedream-4-5-251128",
+    "doubao-seedream-4-0-250828",
+];
+const ARK_PLAN_KNOWN_MODELS = [
+    "doubao-seedance-2-0-260128",
+    "doubao-seedance-2-0-fast-260128",
+    "doubao-seedance-1-0-pro-250528",
+    "doubao-seedance-1-0-lite-t2v-250428",
+    "doubao-seedance-1-0-lite-i2v-250428",
+];
+const ARK_SEED_CHANNELS: ModelChannel[] = [
+    {
+        id: "volcengine-ark",
+        name: "火山方舟",
+        baseUrl: VOLCENGINE_ARK_BASE_URL,
+        apiKey: "",
+        apiFormat: "openai",
+        models: ARK_KNOWN_MODELS,
+    },
+    {
+        id: "volcengine-ark-plan",
+        name: "火山方舟 Agent Plan",
+        baseUrl: VOLCENGINE_ARK_PLAN_BASE_URL,
+        apiKey: "",
+        apiFormat: "openai",
+        models: ARK_PLAN_KNOWN_MODELS,
+    },
+];
+const DEFAULT_OPENAI_CHANNEL: ModelChannel = {
+    id: "default",
+    name: "默认渠道",
+    baseUrl: OPENAI_BASE_URL,
+    apiKey: "",
+    apiFormat: "openai",
+    models: ["gpt-image-2", "grok-imagine-video", "gpt-5.5", "gpt-4o-mini-tts"],
+};
+const DEFAULT_OPENAI_MODELS = DEFAULT_OPENAI_CHANNEL.models;
+const DEFAULT_CHANNELS = [DEFAULT_OPENAI_CHANNEL, ...ARK_SEED_CHANNELS];
+const DEFAULT_MODEL_OPTIONS = modelOptionsFromChannels(DEFAULT_CHANNELS);
 
 export const defaultConfig: AiConfig = {
     channelMode: "local",
     baseUrl: OPENAI_BASE_URL,
     apiKey: "",
     apiFormat: "openai",
-    channels: [
-        {
-            id: "default",
-            name: "默认渠道",
-            baseUrl: OPENAI_BASE_URL,
-            apiKey: "",
-            apiFormat: "openai",
-            models: ["gpt-image-2", "grok-imagine-video", "gpt-5.5", "gpt-4o-mini-tts"],
-        },
-    ],
+    channels: DEFAULT_CHANNELS,
     model: "default::gpt-image-2",
     imageModel: "default::gpt-image-2",
     videoModel: "default::grok-imagine-video",
@@ -169,16 +210,17 @@ export const defaultConfig: AiConfig = {
     videoGenerateAudio: "true",
     videoWatermark: "false",
     systemPrompt: "",
-    models: ["default::gpt-image-2", "default::grok-imagine-video", "default::gpt-5.5", "default::gpt-4o-mini-tts"],
-    imageModels: ["default::gpt-image-2"],
-    videoModels: ["default::grok-imagine-video"],
-    textModels: ["default::gpt-5.5"],
-    audioModels: ["default::gpt-4o-mini-tts"],
+    models: DEFAULT_MODEL_OPTIONS,
+    imageModels: filterModelsByCapability(DEFAULT_MODEL_OPTIONS, "image"),
+    videoModels: filterModelsByCapability(DEFAULT_MODEL_OPTIONS, "video"),
+    textModels: filterModelsByCapability(DEFAULT_MODEL_OPTIONS, "text"),
+    audioModels: filterModelsByCapability(DEFAULT_MODEL_OPTIONS, "audio"),
     quality: "auto",
     size: "1:1",
     count: "1",
     canvasImageCount: "3",
     apipodModelSeedVersion: "",
+    arkModelSeedVersion: "",
 };
 
 export const defaultWebdavSyncConfig: WebdavSyncConfig = {
@@ -310,13 +352,15 @@ export const useConfigStore = create<ConfigStore>()(
                 const persistedWebdav = (persistedState.webdav || {}) as Partial<WebdavSyncConfig>;
                 const config = { ...defaultConfig, ...persistedConfig };
                 if (!Array.isArray(persistedConfig.channels)) config.channels = [];
-                const channels = normalizeChannels(config);
+                const shouldSeedArkChannels = config.arkModelSeedVersion !== ARK_MODEL_SEED_VERSION;
+                const channels = normalizeChannels(config, shouldSeedArkChannels);
                 const models = modelOptionsFromChannels(channels);
                 const shouldSeedApipodModelOptions = config.apipodModelSeedVersion !== APIPOD_MODEL_SEED_VERSION && channels.some(isApipodChannel);
-                const imageModels = normalizeCapabilityModelList(persistedConfig.imageModels, models, channels, "image", shouldSeedApipodModelOptions);
-                const videoModels = normalizeCapabilityModelList(persistedConfig.videoModels, models, channels, "video", shouldSeedApipodModelOptions);
-                const textModels = normalizeCapabilityModelList(persistedConfig.textModels, models, channels, "text", shouldSeedApipodModelOptions);
-                const audioModels = normalizeCapabilityModelList(persistedConfig.audioModels, models, channels, "audio", shouldSeedApipodModelOptions);
+                const shouldSeedArkModelOptions = shouldSeedArkChannels && channels.some(isArkChannel);
+                const imageModels = normalizeCapabilityModelList(persistedConfig.imageModels, models, channels, "image", shouldSeedApipodModelOptions, shouldSeedArkModelOptions);
+                const videoModels = normalizeCapabilityModelList(persistedConfig.videoModels, models, channels, "video", shouldSeedApipodModelOptions, shouldSeedArkModelOptions);
+                const textModels = normalizeCapabilityModelList(persistedConfig.textModels, models, channels, "text", shouldSeedApipodModelOptions, shouldSeedArkModelOptions);
+                const audioModels = normalizeCapabilityModelList(persistedConfig.audioModels, models, channels, "audio", shouldSeedApipodModelOptions, shouldSeedArkModelOptions);
                 return {
                     ...current,
                     webdav: { ...defaultWebdavSyncConfig, ...persistedWebdav },
@@ -344,6 +388,7 @@ export const useConfigStore = create<ConfigStore>()(
                         textModels,
                         audioModels,
                         apipodModelSeedVersion: shouldSeedApipodModelOptions ? APIPOD_MODEL_SEED_VERSION : config.apipodModelSeedVersion || "",
+                        arkModelSeedVersion: shouldSeedArkChannels ? ARK_MODEL_SEED_VERSION : config.arkModelSeedVersion || "",
                     },
                 };
             },
@@ -358,20 +403,24 @@ function normalizeModelList(models: string[], channels: ModelChannel[]) {
         .filter((model) => !allModelOptions.length || allModelOptions.includes(model) || !isChannelModelValue(model));
 }
 
-function withSeededApipodModelOptions(models: string[], channels: ModelChannel[], capability: ModelCapability, shouldSeed: boolean) {
+function withSeededProviderModelOptions(models: string[], channels: ModelChannel[], capability: ModelCapability, shouldSeedApipod: boolean, shouldSeedArk: boolean) {
     const normalized = normalizeModelList(models, channels);
-    if (!shouldSeed) return normalized;
+    if (!shouldSeedApipod && !shouldSeedArk) return normalized;
     const apipodOptions = filterModelsByCapability(
-        channels.filter(isApipodChannel).flatMap((channel) => channel.models.map((model) => encodeChannelModel(channel.id, model))),
+        shouldSeedApipod ? channels.filter(isApipodChannel).flatMap((channel) => channel.models.map((model) => encodeChannelModel(channel.id, model))) : [],
         capability,
     );
-    return uniqueModelOptions([...normalized, ...apipodOptions]);
+    const arkOptions = filterModelsByCapability(
+        shouldSeedArk ? channels.filter(isArkChannel).flatMap((channel) => channel.models.map((model) => encodeChannelModel(channel.id, model))) : [],
+        capability,
+    );
+    return uniqueModelOptions([...normalized, ...apipodOptions, ...arkOptions]);
 }
 
-function normalizeCapabilityModelList(models: string[] | undefined, allModels: string[], channels: ModelChannel[], capability: ModelCapability, shouldSeedApipodModelOptions: boolean) {
+function normalizeCapabilityModelList(models: string[] | undefined, allModels: string[], channels: ModelChannel[], capability: ModelCapability, shouldSeedApipodModelOptions: boolean, shouldSeedArkModelOptions: boolean) {
     const suggested = filterModelsByCapability(allModels, capability);
     const configured = Array.isArray(models) && models.length ? models : suggested;
-    const normalized = withSeededApipodModelOptions(configured, channels, capability, shouldSeedApipodModelOptions);
+    const normalized = withSeededProviderModelOptions(configured, channels, capability, shouldSeedApipodModelOptions, shouldSeedArkModelOptions);
     return normalized.length ? normalized : suggested;
 }
 
@@ -455,7 +504,7 @@ function requestBaseUrlForChannel(channel: ModelChannel) {
     return isApipodChannel(channel) ? "/apipod-proxy" : channel.baseUrl;
 }
 
-function normalizeChannels(config: AiConfig) {
+function normalizeChannels(config: AiConfig, seedArkChannels = false) {
     const persistedChannels = Array.isArray(config.channels) ? config.channels : [];
     const channels = persistedChannels.map((channel, index) =>
         createModelChannel({
@@ -466,18 +515,34 @@ function normalizeChannels(config: AiConfig) {
         }),
     );
     if (!channels.length) {
+        const fallbackBaseUrl = config.baseUrl || defaultConfig.baseUrl;
         channels.push(
             createModelChannel({
                 id: "default",
                 name: "默认渠道",
-                baseUrl: config.baseUrl || defaultConfig.baseUrl,
+                baseUrl: fallbackBaseUrl,
                 apiKey: config.apiKey || "",
                 apiFormat: config.apiFormat || defaultConfig.apiFormat,
-                models: uniqueRawModels([...(config.models || []), config.model, config.imageModel, config.videoModel, config.textModel, config.audioModel]),
+                models: legacyFallbackChannelModels(config, fallbackBaseUrl),
             }),
         );
     }
+    if (seedArkChannels) {
+        const existingIds = new Set(channels.map((channel) => channel.id));
+        const existingBaseUrls = new Set(channels.map((channel) => normalizeChannelBaseUrl(channel.baseUrl)));
+        for (const seedChannel of ARK_SEED_CHANNELS) {
+            if (existingIds.has(seedChannel.id)) continue;
+            if (existingBaseUrls.has(normalizeChannelBaseUrl(seedChannel.baseUrl))) continue;
+            channels.push(createModelChannel(seedChannel));
+        }
+    }
     return channels.map((channel) => ({ ...channel, models: uniqueRawModels(channel.models) }));
+}
+
+function legacyFallbackChannelModels(config: AiConfig, baseUrl: string) {
+    const models = [...(config.models || DEFAULT_OPENAI_MODELS), config.model, config.imageModel, config.videoModel, config.textModel, config.audioModel];
+    const isLegacyArkChannel = isArkChannel({ id: "default", name: "默认渠道", baseUrl });
+    return uniqueRawModels(isLegacyArkChannel ? models : models.filter((model) => !isArkModel(model)));
 }
 
 export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {
@@ -491,6 +556,20 @@ function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
 function isApipodChannel(channel: Partial<ModelChannel>) {
     const marker = `${channel.id || ""} ${channel.name || ""} ${channel.baseUrl || ""}`.toLowerCase();
     return marker.includes("apipod") || marker.includes("api.apipod.ai") || marker.includes("apipod-proxy");
+}
+
+function isArkChannel(channel: Partial<ModelChannel>) {
+    const marker = `${channel.id || ""} ${channel.name || ""} ${channel.baseUrl || ""}`.toLowerCase();
+    return marker.includes("volcengine-ark") || marker.includes("火山方舟") || marker.includes("ark.cn-beijing.volces.com");
+}
+
+function normalizeChannelBaseUrl(baseUrl: string) {
+    return baseUrl.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+function isArkModel(model: string) {
+    const value = modelOptionName(model).toLowerCase();
+    return value.startsWith("doubao-seed");
 }
 
 function uniqueRawModels(models: string[]) {
