@@ -293,8 +293,15 @@ function isApipodConfig(config: Pick<AiConfig, "baseUrl">) {
 }
 
 function isKlingConfig(config: Pick<AiConfig, "baseUrl">) {
-    const value = config.baseUrl.trim().toLowerCase();
-    return value.includes("klingai.com") || value.includes("/kling-proxy");
+    const raw = config.baseUrl.trim();
+    const value = raw.toLowerCase();
+    if (value === "/kling-proxy" || value.startsWith("/kling-proxy/")) return true;
+    try {
+        const host = new URL(raw).hostname.toLowerCase();
+        return host === "klingai.com" || host.endsWith(".klingai.com");
+    } catch {
+        return false;
+    }
 }
 
 async function buildKlingPayload(config: AiConfig, modelId: string, mode: "t2v" | "i2v" | "motion-control", prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[]) {

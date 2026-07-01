@@ -422,7 +422,7 @@ export function createModelChannel(channel?: Partial<ModelChannel>): ModelChanne
         baseUrl: channel?.baseUrl?.trim() || defaultBaseUrlForApiFormat(apiFormat),
         apiKey: channel?.apiKey || "",
         apiFormat,
-        models: uniqueRawModels(channel?.models || []),
+        models: uniqueRawModels((channel?.models || []).length ? channel?.models || [] : seedModelsForChannel(channel || {})),
     };
 }
 
@@ -496,7 +496,7 @@ function apiKeyForChannel(config: AiConfig, channel: ModelChannel) {
 function requestBaseUrlForChannel(channel: ModelChannel) {
     if (isApipodChannel(channel)) return "/apipod-proxy";
     if (isArkChannel(channel)) return arkProxyBaseUrl(channel.baseUrl);
-    if (isKlingChannel(channel)) return "/kling-proxy";
+    if (isKlingChannel(channel)) return klingProxyBaseUrl(channel.baseUrl);
     return channel.baseUrl;
 }
 
@@ -507,7 +507,7 @@ function normalizeChannels(config: AiConfig, seedArkChannels = false, seedKlingC
             ...channel,
             id: channel.id || (index === 0 ? "default" : `channel-${index + 1}`),
             name: channel.name || (index === 0 ? "默认渠道" : `渠道 ${index + 1}`),
-            models: uniqueRawModels([...(channel.models || []), ...seedModelsForChannel(channel)]),
+            models: uniqueRawModels((channel.models || []).length ? channel.models || [] : seedModelsForChannel(channel)),
         }),
     );
     if (!channels.length) {
@@ -556,7 +556,7 @@ function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
     return apiFormat === "gemini" ? "gemini" : "openai";
 }
 
-function seedModelsForChannel(channel: Partial<ModelChannel>) {
+export function seedModelsForChannel(channel: Partial<ModelChannel>) {
     if (isApipodChannel(channel)) return APIPOD_KNOWN_MODELS;
     if (isKlingChannel(channel)) return KLING_KNOWN_MODELS;
     if (!isArkChannel(channel)) return [];
@@ -570,8 +570,32 @@ function isApipodChannel(channel: Partial<ModelChannel>) {
 }
 
 function isKlingChannel(channel: Partial<ModelChannel>) {
-    const marker = `${channel.id || ""} ${channel.name || ""} ${channel.baseUrl || ""}`.toLowerCase();
-    return marker.includes("kling") || marker.includes("可灵") || marker.includes("api-singapore.klingai.com");
+    const label = `${channel.id || ""} ${channel.name || ""}`.toLowerCase();
+    return label.includes("kling") || label.includes("可灵") || isKlingBaseUrl(channel.baseUrl || "") || isKlingProxyBaseUrl(channel.baseUrl || "");
+}
+
+function klingProxyBaseUrl(baseUrl: string) {
+    if (isKlingProxyBaseUrl(baseUrl)) return baseUrl.trim().replace(/\/+$/, "");
+    try {
+        const url = new URL(baseUrl.trim());
+        return isKlingBaseUrl(baseUrl) ? `/kling-proxy/${encodeURIComponent(url.hostname)}` : "/kling-proxy";
+    } catch {
+        return "/kling-proxy";
+    }
+}
+
+function isKlingBaseUrl(baseUrl: string) {
+    try {
+        const host = new URL(baseUrl.trim()).hostname.toLowerCase();
+        return host === "klingai.com" || host.endsWith(".klingai.com");
+    } catch {
+        return false;
+    }
+}
+
+function isKlingProxyBaseUrl(baseUrl: string) {
+    const value = baseUrl.trim().toLowerCase();
+    return value === "/kling-proxy" || value.startsWith("/kling-proxy/");
 }
 
 function isArkChannel(channel: Partial<ModelChannel>) {

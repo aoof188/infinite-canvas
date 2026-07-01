@@ -9,7 +9,7 @@ import { fetchChannelModels } from "@/services/api/image";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
-import { createModelChannel, defaultBaseUrlForApiFormat, filterModelsByCapability, modelOptionLabel, modelOptionsFromChannels, normalizeModelOptionValue, useConfigStore, type AiConfig, type ApiCallFormat, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { createModelChannel, defaultBaseUrlForApiFormat, filterModelsByCapability, modelOptionLabel, modelOptionsFromChannels, normalizeModelOptionValue, seedModelsForChannel, useConfigStore, type AiConfig, type ApiCallFormat, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -93,6 +93,27 @@ export function AppConfigModal() {
         saveConfig(nextConfig);
     };
 
+    const updateChannelModelsFromLatest = (requestChannel: ModelChannel, models: string[], onlyWhenEmpty = false) => {
+        const latestConfig = useConfigStore.getState().config;
+        let applied = false;
+        let skipped = false;
+        const channels = latestConfig.channels.map((channel) => {
+            if (channel.id !== requestChannel.id) return channel;
+            if (!isSameModelRefreshTarget(channel, requestChannel)) {
+                skipped = true;
+                return channel;
+            }
+            if (onlyWhenEmpty && channel.models.length) {
+                skipped = true;
+                return channel;
+            }
+            applied = true;
+            return { ...channel, models: uniqueModels(models) };
+        });
+        if (applied) saveConfig(withChannels(latestConfig, channels));
+        return { applied, skipped };
+    };
+
     const updateChannel = (id: string, patch: Partial<ModelChannel>) => {
         updateChannels(config.channels.map((channel) => (channel.id === id ? { ...channel, ...patch, models: patch.models ? uniqueModels(patch.models) : channel.models } : channel)));
     };
@@ -121,10 +142,29 @@ export function AppConfigModal() {
         }
         setLoadingChannelId(channel.id);
         try {
-            const models = await fetchChannelModels(channel);
-            updateChannels(config.channels.map((item) => (item.id === channel.id ? { ...item, models } : item)));
-            message.success(`${channel.name} 模型列表已更新`);
+            const fetchedModels = await fetchChannelModels(channel);
+            const seedModels = seedModelsForChannel(channel);
+            if (fetchedModels.length) {
+                const result = updateChannelModelsFromLatest(channel, fetchedModels);
+                message[result.applied ? "success" : "warning"](result.applied ? `${channel.name} 模型列表已更新` : `${channel.name} 配置已变更，已跳过旧的模型结果`);
+            } else if (seedModels.length) {
+                const result = updateChannelModelsFromLatest(channel, seedModels, true);
+                message.warning(result.applied ? `${channel.name} 未返回模型，已使用内置模型列表` : `${channel.name} 未返回模型，已保留现有模型列表`);
+            } else {
+                message.warning(`${channel.name} 未返回模型`);
+            }
         } catch (error) {
+            const latestChannel = useConfigStore.getState().config.channels.find((item) => item.id === channel.id);
+            const seedModels = seedModelsForChannel(latestChannel || channel);
+            if (seedModels.length && latestChannel && isSameModelRefreshTarget(latestChannel, channel)) {
+                const result = updateChannelModelsFromLatest(channel, seedModels, true);
+                message.warning(result.applied ? `${channel.name} 暂不支持直接拉取模型，已使用内置模型列表` : `${channel.name} 拉取失败，已保留现有模型列表`);
+                return;
+            }
+            if (latestChannel && !isSameModelRefreshTarget(latestChannel, channel)) {
+                message.warning(`${channel.name} 配置已变更，已跳过旧的模型结果`);
+                return;
+            }
             message.error(error instanceof Error ? error.message : "读取模型失败");
         } finally {
             setLoadingChannelId("");
@@ -139,10 +179,56 @@ export function AppConfigModal() {
         }
         setLoadingChannelId("all");
         try {
-            const entries = await Promise.all(runnable.map(async (channel) => [channel.id, await fetchChannelModels(channel)] as const));
-            const modelMap = new Map(entries);
-            updateChannels(config.channels.map((channel) => (modelMap.has(channel.id) ? { ...channel, models: modelMap.get(channel.id) || [] } : channel)));
-            message.success("模型列表已更新");
+            const entries = await Promise.all(
+                runnable.map(async (channel) => {
+                    try {
+                        const fetchedModels = await fetchChannelModels(channel);
+                        const seedModels = seedModelsForChannel(channel);
+                        return { channel, models: fetchedModels.length ? fetchedModels : seedModels, fallback: !fetchedModels.length && seedModels.length > 0, failed: false, onlyWhenEmpty: !fetchedModels.length };
+                    } catch {
+                        return { channel, models: [], fallback: false, failed: true, onlyWhenEmpty: true };
+                    }
+                }),
+            );
+            const latestConfig = useConfigStore.getState().config;
+            let skipped = false;
+            let changed = false;
+            let usedFallback = false;
+            let failed = false;
+            let retainedExisting = false;
+            const channels = latestConfig.channels.map((channel) => {
+                const entry = entries.find((item) => item.channel.id === channel.id);
+                if (!entry) return channel;
+                if (!isSameModelRefreshTarget(channel, entry.channel)) {
+                    skipped = true;
+                    return channel;
+                }
+                if (entry.failed && !entry.models.length) {
+                    failed = true;
+                    const seedModels = seedModelsForChannel(channel);
+                    if (seedModels.length && !channel.models.length) {
+                        changed = true;
+                        usedFallback = true;
+                        return { ...channel, models: uniqueModels(seedModels) };
+                    }
+                    return channel;
+                }
+                if (!entry.models.length) return channel;
+                if (entry.onlyWhenEmpty && channel.models.length) {
+                    retainedExisting = true;
+                    return channel;
+                }
+                if (entry.fallback) usedFallback = true;
+                if (!sameModels(channel.models, entry.models)) changed = true;
+                return { ...channel, models: uniqueModels(entry.models) };
+            });
+            if (changed) saveConfig(withChannels(latestConfig, channels));
+            if (skipped) message.warning("部分渠道配置已变更，已跳过旧的模型结果");
+            else if (usedFallback) message.warning("部分渠道使用了内置模型列表");
+            else if (retainedExisting) message.warning("部分渠道未返回模型，已保留现有模型列表");
+            else if (failed) message.warning("部分渠道读取失败，已保留现有模型列表");
+            else if (entries.some((entry) => !entry.failed && !entry.models.length)) message.warning("部分渠道未返回模型");
+            else message.success("模型列表已更新");
         } catch (error) {
             message.error(error instanceof Error ? error.message : "读取模型失败");
         } finally {
@@ -435,18 +521,19 @@ export function AppConfigModal() {
 }
 
 function withChannels(config: AiConfig, channels: ModelChannel[]): AiConfig {
-    const models = modelOptionsFromChannels(channels);
+    const normalizedChannels = channels.map((channel) => ({ ...channel, models: uniqueModels(channel.models.length ? channel.models : seedModelsForChannel(channel)) }));
+    const models = modelOptionsFromChannels(normalizedChannels);
     const imageModels = keepOrSuggest(config.imageModels, filterModelsByCapability(models, "image"), models);
     const videoModels = keepOrSuggest(config.videoModels, filterModelsByCapability(models, "video"), models);
     const textModels = keepOrSuggest(config.textModels, filterModelsByCapability(models, "text"), models);
     const audioModels = keepOrSuggest(config.audioModels, filterModelsByCapability(models, "audio"), models);
     return {
         ...config,
-        channels,
+        channels: normalizedChannels,
         models,
-        baseUrl: channels[0]?.baseUrl || config.baseUrl,
-        apiKey: channels[0]?.apiKey || config.apiKey,
-        apiFormat: channels[0]?.apiFormat || config.apiFormat,
+        baseUrl: normalizedChannels[0]?.baseUrl || config.baseUrl,
+        apiKey: normalizedChannels[0]?.apiKey || config.apiKey,
+        apiFormat: normalizedChannels[0]?.apiFormat || config.apiFormat,
         imageModels,
         videoModels,
         textModels,
@@ -462,6 +549,16 @@ function keepOrSuggest(current: string[], suggested: string[], allModels: string
     const available = new Set(allModels);
     const kept = uniqueModels(current).filter((model) => available.has(model));
     return kept.length ? kept : suggested;
+}
+
+function isSameModelRefreshTarget(channel: ModelChannel, snapshot: ModelChannel) {
+    return channel.baseUrl === snapshot.baseUrl && channel.apiKey === snapshot.apiKey && channel.apiFormat === snapshot.apiFormat && sameModels(channel.models, snapshot.models);
+}
+
+function sameModels(left: string[], right: string[]) {
+    const normalizedLeft = uniqueModels(left);
+    const normalizedRight = uniqueModels(right);
+    return normalizedLeft.length === normalizedRight.length && normalizedLeft.every((model, index) => model === normalizedRight[index]);
 }
 
 function normalizeDefaultModel(value: string, options: string[]) {

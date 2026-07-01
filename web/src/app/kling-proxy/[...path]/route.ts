@@ -14,7 +14,8 @@ async function proxyKling(request: Request, context: { params: Promise<{ path?: 
 
     const { path = [] } = await context.params;
     const requestUrl = new URL(request.url);
-    const targetUrl = new URL(path.map(encodeURIComponent).join("/"), `${KLING_BASE_URL}/`);
+    const { baseUrl, targetPath } = klingTarget(path);
+    const targetUrl = new URL(targetPath.map(encodeURIComponent).join("/"), `${baseUrl}/`);
     targetUrl.search = requestUrl.search;
 
     const headers = new Headers();
@@ -34,6 +35,23 @@ async function proxyKling(request: Request, context: { params: Promise<{ path?: 
         statusText: upstream.statusText,
         headers: responseHeaders(upstream.headers),
     });
+}
+
+function klingTarget(path: string[]) {
+    const [maybeHost, ...rest] = path;
+    const host = normalizeKlingHost(maybeHost);
+    if (host) return { baseUrl: `https://${host}`, targetPath: rest };
+    return { baseUrl: KLING_BASE_URL, targetPath: path };
+}
+
+function normalizeKlingHost(value: string | undefined) {
+    if (!value) return "";
+    try {
+        const host = new URL(`https://${value}`).hostname.toLowerCase();
+        return host === "klingai.com" || host.endsWith(".klingai.com") ? host : "";
+    } catch {
+        return "";
+    }
 }
 
 function parseKlingCredentials(value: string | null) {
