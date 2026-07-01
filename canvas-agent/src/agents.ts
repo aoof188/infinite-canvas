@@ -33,14 +33,14 @@ export async function runCodexTurn(prompt: string, emit: AgentEmit, attachments:
 async function runCodexTurnNow(prompt: string, emit: AgentEmit, attachments: AgentAttachment[], options: CodexRunOptions) {
     let files: string[] = [];
     try {
-        files = await writeAttachmentFiles(attachments);
+        files = await writeCodexAttachmentFiles(attachments);
         codexApp ||= await CodexAppClient.start(emit);
         const threadId = await ensureCodexThread(codexApp, options);
         await codexApp.startTurn(threadId, prompt, files);
     } catch (error) {
         emit("agent_error", { message: errorMessage(error) });
     } finally {
-        await Promise.all(files.map((file) => fs.unlink(file).catch(() => undefined)));
+        await cleanupAttachmentFiles(files);
     }
 }
 
@@ -436,22 +436,64 @@ function toolName(name: string) {
     return name;
 }
 
-async function writeAttachmentFiles(attachments: AgentAttachment[]) {
-    return await Promise.all(attachments.filter((item) => item.dataUrl?.startsWith("data:image/")).map(writeAttachmentFile));
+export function validateCodexAttachments(attachments: AgentAttachment[]) {
+    attachments.filter((item) => item.dataUrl?.startsWith("data:image/")).forEach(decodeAttachment);
+}
+
+async function writeCodexAttachmentFiles(attachments: AgentAttachment[]) {
+    const files: string[] = [];
+    try {
+        for (const attachment of attachments.filter((item) => item.dataUrl?.startsWith("data:image/"))) {
+            files.push(await writeAttachmentFile(attachment));
+        }
+        return files;
+    } catch (error) {
+        await cleanupAttachmentFiles(files);
+        throw error;
+    }
+}
+
+async function cleanupAttachmentFiles(files: string[]) {
+    await Promise.all(files.map((file) => fs.unlink(file).catch(() => undefined)));
 }
 
 async function writeAttachmentFile(item: AgentAttachment) {
-    const [, meta = "", data = ""] = item.dataUrl?.match(/^data:([^;]+);base64,(.+)$/) || [];
-    if (!data) throw new Error(`图片附件无效：${item.name || "未命名图片"}`);
-    const file = path.join(os.tmpdir(), `infinite-canvas-${Date.now()}-${Math.random().toString(16).slice(2)}.${imageExt(meta || item.type)}`);
-    await fs.writeFile(file, Buffer.from(data, "base64"));
+    const { mimeType, bytes } = decodeAttachment(item);
+    const ext = imageExt(mimeType);
+    const file = path.join(os.tmpdir(), `infinite-canvas-${Date.now()}-${Math.random().toString(16).slice(2)}.${ext}`);
+    await fs.writeFile(file, bytes);
     return file;
 }
 
-function imageExt(type = "") {
-    if (type.includes("png")) return "png";
-    if (type.includes("webp")) return "webp";
-    return "jpg";
+function decodeAttachment(item: AgentAttachment) {
+    const [, meta = "", data = ""] = item.dataUrl?.match(/^data:([^;]+);base64,(.+)$/) || [];
+    if (!data) throw new Error(`图片附件无效：${item.name || "未命名图片"}`);
+    const mimeType = imageMimeType(meta || item.type);
+    if (!mimeType) throw new Error(`Codex 不支持 ${meta || item.type || "该格式"} 图片附件，请转成 PNG 后再发送。`);
+    const bytes = Buffer.from(data, "base64");
+    if (!validImageBytes(mimeType, bytes)) throw new Error(`图片附件格式无效，请转成 PNG 后再发送：${item.name || "未命名图片"}`);
+    return { mimeType, bytes };
+}
+
+function imageMimeType(type = "") {
+    const value = type.toLowerCase().split(";", 1)[0].trim();
+    if (value === "image/png" || value === "image/jpeg" || value === "image/jpg" || value === "image/webp") return value === "image/jpg" ? "image/jpeg" : value;
+    return "";
+}
+
+function imageExt(mimeType: string) {
+    return mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
+}
+
+function validImageBytes(mimeType: string, bytes: Buffer) {
+    if (mimeType === "image/png") return bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    if (mimeType === "image/jpeg") return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+    if (mimeType === "image/webp") {
+        if (bytes.length < 16) return false;
+        const chunk = bytes.subarray(12, 16).toString("ascii");
+        return bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP" && (chunk === "VP8 " || chunk === "VP8L" || chunk === "VP8X");
+    }
+    return false;
 }
 
 function codexBin() {

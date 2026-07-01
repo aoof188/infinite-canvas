@@ -1,11 +1,16 @@
+import type { Server } from "node:http";
+
 import express, { type NextFunction, type Request, type Response } from "express";
 
 import { DEFAULT_PORT, ensureCanvasWorkspace, loadConfig, saveConfig, updateCanvasWorkspace, type CanvasAgentConfig } from "./config.js";
 import { CanvasSession } from "./canvas-session.js";
-import { archiveCodexThread, listCodexThreads, readCodexThread, resumeCodexThread, runClaudeTurn, runCodexTurn, startCodexThread, summarizeCodexThread, verifyCodexThreadWorkspace, withAgentPrompt } from "./agents.js";
+import { archiveCodexThread, listCodexThreads, readCodexThread, resumeCodexThread, runClaudeTurn, runCodexTurn, startCodexThread, summarizeCodexThread, validateCodexAttachments, verifyCodexThreadWorkspace, withAgentPrompt } from "./agents.js";
 import type { AgentAttachment } from "./types.js";
 
+let httpServer: Server | null = null;
+
 export function startHttpServer() {
+    if (httpServer) return httpServer;
     const config = loadConfig(true);
     const port = Number(process.env.PORT) || Number(new URL(config.url).port) || DEFAULT_PORT;
     config.url = `http://127.0.0.1:${port}`;
@@ -75,6 +80,8 @@ export function startHttpServer() {
     }));
     app.post("/agent/codex/turn", route(async (req, res) => {
         const attachments = Array.isArray(req.body?.attachments) ? (req.body.attachments as AgentAttachment[]) : [];
+        const prompt = withAgentPrompt(String(req.body?.prompt || ""));
+        validateCodexAttachments(attachments);
         const workspace = ensureCanvasWorkspace(config, String(req.body?.canvasId || ""));
         let threadId = String(req.body?.threadId || workspace.activeThreadId || "");
         if (!threadId) {
@@ -85,7 +92,7 @@ export function startHttpServer() {
             await verifyCodexThreadWorkspace(emit, threadId, workspace.workspacePath);
             updateCanvasWorkspace(config, workspace.canvasId, { activeThreadId: threadId });
         }
-        void runCodexTurn(withAgentPrompt(String(req.body?.prompt || "")), emit, attachments, { threadId, cwd: workspace.workspacePath });
+        void runCodexTurn(prompt, emit, attachments, { threadId, cwd: workspace.workspacePath });
         res.json({ ok: true, threadId });
     }));
     app.post("/agent/claude/turn", (req, res) => {
@@ -95,12 +102,17 @@ export function startHttpServer() {
     app.use((_req, res) => res.status(404).json({ ok: false, error: "not found" }));
     app.use((error: Error, _req: Request, res: Response, _next: NextFunction) => res.status(500).json({ ok: false, error: error.message }));
 
-    app.listen(port, "127.0.0.1", () => {
+    httpServer = app.listen(port, "127.0.0.1", () => {
         console.log("Infinite Canvas Agent");
         console.log(`Local URL: ${config.url}`);
         console.log(`Connect token: ${config.token}`);
         console.log("Codex MCP: codex mcp add infinite-canvas -- npx -y @basketikun/canvas-agent mcp");
     });
+    httpServer.on("error", (error) => {
+        console.error(error);
+        process.exitCode = 1;
+    });
+    return httpServer;
 }
 
 function route(handler: (req: Request, res: Response) => Promise<unknown>) {

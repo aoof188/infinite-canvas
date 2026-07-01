@@ -17,6 +17,9 @@ import { AgentChatComposer, AgentChatMessage, AgentPanelTabs, AgentPendingToolCa
 const PANEL_MOTION_SECONDS = 0.5;
 const MAX_ATTACHMENTS = 6;
 const MAX_ATTACHMENT_PAYLOAD_BYTES = 28 * 1024 * 1024;
+const SVG_CONVERSION_TIMEOUT_MS = 10000;
+const SVG_RASTER_MAX_SIDE = 2048;
+const SVG_MIME_TYPE = "image/svg+xml";
 const DEFAULT_AGENT_URL = "http://127.0.0.1:17371";
 const AGENT_CONNECT_STEPS = [
     { title: "安装 Codex 插件", text: "在 Codex app 安装 Infinite Canvas 插件后，首次使用插件会自动启动本地 Agent。" },
@@ -174,23 +177,24 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
         const requestPrompt = promptWithAttachments(text, files);
         if (!connected || !requestPrompt || sending || waiting) return;
         if (attachmentPayloadBytes(files) > MAX_ATTACHMENT_PAYLOAD_BYTES) {
-            addMessage({ role: "error", title: "图片过大", text: "图片附件超过 30MB，请删减后再发送。" });
+            addMessage({ role: "error", title: "图片过大", text: "图片附件超过 28MB，请删减后再发送。" });
             return;
         }
         setAgentState({ activity: "发送中", sending: true, waiting: true });
-        addMessage({ role: "user", text: text || "发送了图片", attachments: files });
-        addEventLog("用户发送", { text, attachments: files.map(({ name, type, size }) => ({ name, type, size })) });
         try {
             const res = await fetch(`${endpoint}/agent/codex/turn?token=${encodeURIComponent(token)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: requestPrompt, canvasId: snapshotRef.current.projectId, threadId: useCanvasAgentStore.getState().activeThreadId || undefined, attachments: files.map(({ name, type, dataUrl }) => ({ name, type, dataUrl })) }) });
-            if (!res.ok) throw new Error("本地 Agent 拒绝了请求");
+            if (!res.ok) throw new Error(await responseErrorText(res, "本地 Agent 拒绝了请求"));
             const data = (await res.json()) as { threadId?: string };
             if (data.threadId) setAgentState({ activeThreadId: data.threadId });
+            addMessage({ role: "user", text: text || "发送了图片", attachments: files });
+            addEventLog("用户发送", { text, attachments: files.map(({ name, type, size }) => ({ name, type, size })) });
             addEventLog("本地 Agent 已接收", { status: res.status });
+            const sentIds = new Set(files.map((item) => item.id));
             files.forEach((item) => {
                 URL.revokeObjectURL(item.url);
                 attachmentUrlsRef.current.delete(item.url);
             });
-            setAgentState({ prompt: "", attachments: [] });
+            setAgentState({ prompt: "", attachments: useCanvasAgentStore.getState().attachments.filter((item) => !sentIds.has(item.id)) });
         } catch (error) {
             setAgentState({ activity: "发送失败", waiting: false });
             addMessage({ role: "error", title: "发送失败", text: error instanceof Error ? error.message : "发送失败" });
@@ -202,26 +206,42 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
 
     const addAttachments = async (files: FileList | File[] | null) => {
         if (!files) return;
-        const images = Array.from(files).filter((file) => file.type.startsWith("image/"));
+        if (sending || waiting) return;
+        const images = Array.from(files).filter((file) => file.type.startsWith("image/") || /\.svg$/i.test(file.name));
         const prev = useCanvasAgentStore.getState().attachments;
+        const prepared: AgentAttachment[] = [];
         try {
-            const next = await Promise.all(images.slice(0, Math.max(0, MAX_ATTACHMENTS - prev.length)).map(async (file) => {
-                const dataUrl = await readDataUrl(file);
-                const url = URL.createObjectURL(file);
-                attachmentUrlsRef.current.add(url);
-                return { id: createId(), name: file.name, type: file.type, size: file.size, url, dataUrl };
-            }));
-            const merged = [...prev, ...next];
-            if (attachmentPayloadBytes(merged) > MAX_ATTACHMENT_PAYLOAD_BYTES) {
-                next.forEach((item) => {
-                    URL.revokeObjectURL(item.url);
-                    attachmentUrlsRef.current.delete(item.url);
-                });
-                addMessage({ role: "error", title: "图片过大", text: "图片附件最多约 30MB。" });
-                return;
+            let payloadBytes = attachmentPayloadBytes(prev);
+            for (const file of images.slice(0, Math.max(0, MAX_ATTACHMENTS - prev.length))) {
+                const attachment = await prepareAgentAttachment(file);
+                payloadBytes += attachment.dataUrl.length;
+                if (payloadBytes > MAX_ATTACHMENT_PAYLOAD_BYTES) {
+                    URL.revokeObjectURL(attachment.url);
+                    throw new Error("图片附件最多约 28MB。");
+                }
+                prepared.push(attachment);
             }
-            if (next.length) setAgentState({ attachments: merged });
+            const current = useCanvasAgentStore.getState().attachments;
+            const accepted: AgentAttachment[] = [];
+            let nextPayloadBytes = attachmentPayloadBytes(current);
+            let remainingSlots = Math.max(0, MAX_ATTACHMENTS - current.length);
+            for (const attachment of prepared) {
+                const nextBytes = nextPayloadBytes + attachment.dataUrl.length;
+                if (!remainingSlots || nextBytes > MAX_ATTACHMENT_PAYLOAD_BYTES) {
+                    URL.revokeObjectURL(attachment.url);
+                    continue;
+                }
+                nextPayloadBytes = nextBytes;
+                remainingSlots -= 1;
+                attachmentUrlsRef.current.add(attachment.url);
+                accepted.push(attachment);
+            }
+            if (accepted.length) setAgentState({ attachments: [...current, ...accepted] });
         } catch (error) {
+            prepared.forEach((item) => {
+                URL.revokeObjectURL(item.url);
+                attachmentUrlsRef.current.delete(item.url);
+            });
             addMessage({ role: "error", title: "图片读取失败", text: error instanceof Error ? error.message : "图片读取失败" });
         }
     };
@@ -557,7 +577,7 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
                         onSubmit={sendPrompt}
                         onAddFiles={addAttachments}
                         onRemoveAttachment={removeAttachment}
-                        left={attachments.length ? <span className="text-[11px]" style={{ color: theme.node.muted }}>{formatBytes(attachmentPayloadBytes(attachments))} / 30MB</span> : null}
+                        left={attachments.length ? <span className="text-[11px]" style={{ color: theme.node.muted }}>{formatBytes(attachmentPayloadBytes(attachments))} / 28MB</span> : null}
                     />
                 </>
             )}
@@ -992,6 +1012,11 @@ async function fetchAgentJson<T>(endpoint: string, token: string, path: string, 
     return data;
 }
 
+async function responseErrorText(res: Response, fallback: string) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string; msg?: string };
+    return data.error || data.msg || fallback;
+}
+
 async function discoverAgentConfig(endpoint: string) {
     try {
         const res = await fetch(`${endpoint}/config`);
@@ -1026,11 +1051,124 @@ function clamp(value: number, min: number, max: number) {
     return Math.min(max, Math.max(min, value));
 }
 
-function readDataUrl(file: File) {
+function readDataUrl(file: Blob) {
     return new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result || ""));
         reader.onerror = () => reject(reader.error || new Error("读取图片失败"));
         reader.readAsDataURL(file);
     });
+}
+
+async function prepareAgentAttachment(file: File): Promise<AgentAttachment> {
+    const dataUrl = await readDataUrl(file);
+    if (!isSvgAttachment(file, dataUrl)) {
+        const url = URL.createObjectURL(file);
+        return { id: createId(), name: file.name, type: file.type, size: file.size, url, dataUrl };
+    }
+    const pngDataUrl = await svgToPngDataUrl(svgDataUrl(dataUrl));
+    const blob = await (await fetch(pngDataUrl)).blob();
+    const url = URL.createObjectURL(blob);
+    return { id: createId(), name: pngAttachmentName(file.name), type: "image/png", size: blob.size || dataUrlBytes(pngDataUrl), url, dataUrl: pngDataUrl };
+}
+
+function isSvgAttachment(file: File, dataUrl: string) {
+    return file.type === SVG_MIME_TYPE || dataUrl.startsWith(`data:${SVG_MIME_TYPE}`) || /\.svg$/i.test(file.name);
+}
+
+function svgDataUrl(dataUrl: string) {
+    return dataUrl.replace(/^data:[^,]*,/, `data:${SVG_MIME_TYPE};base64,`);
+}
+
+function svgToPngDataUrl(dataUrl: string) {
+    return new Promise<string>((resolve, reject) => {
+        const image = new Image();
+        const fallbackSize = parseSvgRasterSize(dataUrl);
+        let done = false;
+        const finish = (fn: () => void) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            image.onload = null;
+            image.onerror = null;
+            image.src = "";
+            fn();
+        };
+        const timer = setTimeout(() => finish(() => reject(new Error("SVG 附件转换超时，请转成 PNG 后再发送。"))), SVG_CONVERSION_TIMEOUT_MS);
+        image.onload = () => {
+            const naturalSize = image.naturalWidth && image.naturalHeight ? fitSvgRasterSize(image.naturalWidth, image.naturalHeight) : null;
+            const { width, height } = fallbackSize || naturalSize || { width: 1024, height: 1024 };
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            const context = canvas.getContext("2d");
+            if (!context) {
+                finish(() => reject(new Error("SVG 附件转换失败，请转成 PNG 后再发送。")));
+                return;
+            }
+            try {
+                context.drawImage(image, 0, 0, width, height);
+                canvas.toBlob((blob) => {
+                    if (!blob) {
+                        finish(() => reject(new Error("SVG 附件转换失败，请转成 PNG 后再发送。")));
+                        return;
+                    }
+                    void readDataUrl(blob).then((value) => finish(() => resolve(value)), (error) => finish(() => reject(error)));
+                }, "image/png");
+            } catch {
+                finish(() => reject(new Error("SVG 附件包含无法转换的内容，请转成 PNG 后再发送。")));
+            }
+        };
+        image.onerror = () => finish(() => reject(new Error("SVG 附件无法转换，请转成 PNG 后再发送。")));
+        image.src = dataUrl;
+    });
+}
+
+function parseSvgRasterSize(dataUrl: string) {
+    const svgText = dataUrlText(dataUrl);
+    if (!svgText) return null;
+    try {
+        const svg = new DOMParser().parseFromString(svgText, "image/svg+xml").documentElement;
+        if (!svg || svg.tagName.toLowerCase() !== "svg") return null;
+        const width = parseSvgLength(svg.getAttribute("width"));
+        const height = parseSvgLength(svg.getAttribute("height"));
+        if (width && height) return fitSvgRasterSize(width, height);
+        const viewBox = (svg.getAttribute("viewBox") || "").trim().split(/[\s,]+/).map(Number);
+        if (viewBox.length === 4 && viewBox.every(Number.isFinite) && viewBox[2] > 0 && viewBox[3] > 0) return fitSvgRasterSize(viewBox[2], viewBox[3]);
+    } catch {}
+    return null;
+}
+
+function fitSvgRasterSize(width: number, height: number) {
+    const scale = Math.min(1, SVG_RASTER_MAX_SIDE / Math.max(width, height));
+    return { width: clamp(Math.ceil(width * scale), 1, SVG_RASTER_MAX_SIDE), height: clamp(Math.ceil(height * scale), 1, SVG_RASTER_MAX_SIDE) };
+}
+
+function parseSvgLength(value: string | null) {
+    if (!value || value.includes("%")) return 0;
+    const match = value.trim().match(/^([\d.]+)/);
+    return match ? Number(match[1]) || 0 : 0;
+}
+
+function dataUrlText(dataUrl: string) {
+    const [, meta = "", data = ""] = dataUrl.match(/^data:([^,]*),(.*)$/) || [];
+    if (!data) return "";
+    try {
+        if (!meta.toLowerCase().includes(";base64")) return decodeURIComponent(data);
+        const binary = atob(data);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+        return new TextDecoder().decode(bytes);
+    } catch {
+        return "";
+    }
+}
+
+function pngAttachmentName(name: string) {
+    return `${name.replace(/\.[^.]+$/, "") || "attachment"}.png`;
+}
+
+function dataUrlBytes(dataUrl: string) {
+    const value = dataUrl.split(",", 2)[1] || "";
+    return Math.floor((value.length * 3) / 4);
 }
