@@ -73,7 +73,7 @@ const VOLCENGINE_ARK_PLAN_BASE_URL = "https://ark.cn-beijing.volces.com/api/plan
 const KLING_BASE_URL = "https://api-singapore.klingai.com";
 const APIPOD_MODEL_SEED_VERSION = "2026-07-01";
 const ARK_MODEL_SEED_VERSION = "2026-07-01-standard-video";
-const KLING_MODEL_SEED_VERSION = "2026-07-01-video";
+const KLING_MODEL_SEED_VERSION = "2026-07-01-video-expanded";
 // APIPod does not expose every multimodal model through /v1/models, so keep this local seed list for the config UI.
 const APIPOD_KNOWN_MODELS = [
     "gpt-image-2",
@@ -168,21 +168,40 @@ const ARK_PLAN_KNOWN_MODELS = [
     "doubao-seedance-1-0-lite-i2v-250428",
 ];
 const KLING_KNOWN_MODELS = [
+    "kling-v3-0-t2v",
+    "kling-v3-0-i2v",
+    "kling-v3-0-turbo-t2v",
+    "kling-v3-0-turbo-i2v",
     "kling-v3.0-t2v",
     "kling-v3.0-i2v",
+    "kling-v2-6-t2v",
+    "kling-v2-6-i2v",
     "kling-v2.6-t2v",
     "kling-v2.6-i2v",
     "kling-v2.6-motion-control",
+    "kling-v3-0-motion-control",
     "kling-v3.0-motion-control",
+    "kling-v2-5-t2v",
+    "kling-v2-5-i2v",
     "kling-v2.5-turbo-t2v",
     "kling-v2.5-turbo-i2v",
+    "kling-v2-1-master-t2v",
+    "kling-v2-1-master-i2v",
     "kling-v2.1-master-t2v",
     "kling-v2.1-master-i2v",
+    "kling-v2-1-t2v",
+    "kling-v2-1-i2v",
+    "kling-v2.1-t2v",
     "kling-v2.1-i2v",
     "kling-v2-master-t2v",
     "kling-v2-master-i2v",
+    "kling-v1-6-t2v",
+    "kling-v1-6-i2v",
     "kling-v1.6-t2v",
     "kling-v1.6-i2v",
+    "kling-v1-5-t2v",
+    "kling-v1-5-i2v",
+    "kling-v1.5-t2v",
     "kling-v1.5-i2v",
     "kling-v1-t2v",
     "kling-v1-i2v",
