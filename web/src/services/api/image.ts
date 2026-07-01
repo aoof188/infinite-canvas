@@ -113,6 +113,13 @@ const QUALITY_ALIASES: Record<string, string> = {
     "2k": "medium",
     "4k": "high",
 };
+const APIPOD_QUALITY: Record<string, string> = {
+    low: "1K",
+    standard: "1K",
+    medium: "2K",
+    hd: "2K",
+    high: "4K",
+};
 const DEFAULT_IMAGE_SHORT_SIDE = 1024;
 const IMAGE_SIZE_STEP = 16;
 const IMAGE_MIN_PIXELS = 655360;
@@ -187,6 +194,45 @@ function resolveRequestSize(quality: string | undefined, size: string) {
     }
     if (value.includes(":")) return resolveSize(quality, value);
     throw new Error("图像尺寸格式不支持，请使用 auto、9:16 或 1024x1024");
+}
+
+function isApipodConfig(config: Pick<AiConfig, "baseUrl">) {
+    const value = config.baseUrl.trim().toLowerCase();
+    return value.includes("apipod") || value.includes("/apipod-proxy");
+}
+
+function apipodQuality(quality: string) {
+    const normalized = normalizeQuality(quality);
+    return normalized ? APIPOD_QUALITY[normalized] : undefined;
+}
+
+function apipodAspectRatio(size: string) {
+    const value = size.trim().toLowerCase();
+    if (!value || value === "auto") return "auto";
+    if (value.includes(":")) return value;
+    const dimensions = parseImageDimensions(value);
+    if (!dimensions) return "auto";
+    const divisor = gcd(dimensions.width, dimensions.height);
+    return `${dimensions.width / divisor}:${dimensions.height / divisor}`;
+}
+
+function gcd(a: number, b: number): number {
+    return b ? gcd(b, a % b) : Math.abs(a);
+}
+
+function isApipodWanImageModel(model: string) {
+    const value = model.toLowerCase();
+    return value.includes("wan") && value.includes("image");
+}
+
+function apipodImageOptions(config: AiConfig) {
+    const quality = apipodQuality(config.quality);
+    const isWanImage = isApipodWanImageModel(config.model);
+    return {
+        aspect_ratio: apipodAspectRatio(config.size),
+        ...(quality ? (isWanImage ? { size: quality } : { quality }) : {}),
+        ...(isWanImage ? { thinking_mode: true, watermark: false } : {}),
+    };
 }
 
 function resolveImageDataUrl(item: Record<string, unknown>) {
@@ -456,8 +502,9 @@ function consumeResponseStreamText(state: ResponseStreamState, text: string, onD
     for (;;) {
         const match = state.buffer.match(/\r?\n\r?\n/);
         if (!match) break;
-        consumeResponseStreamBlock(state.buffer.slice(0, match.index), state, onDelta);
-        state.buffer = state.buffer.slice(match.index + match[0].length);
+        const index = match.index ?? 0;
+        consumeResponseStreamBlock(state.buffer.slice(0, index), state, onDelta);
+        state.buffer = state.buffer.slice(index + match[0].length);
     }
     if (flush && state.buffer.trim()) {
         consumeResponseStreamBlock(state.buffer, state, onDelta);
@@ -604,8 +651,9 @@ function consumeGeminiStreamText(state: GeminiStreamState, text: string, onDelta
     for (;;) {
         const match = state.buffer.match(/\r?\n\r?\n/);
         if (!match) break;
-        consumeGeminiStreamBlock(state.buffer.slice(0, match.index), state, onDelta);
-        state.buffer = state.buffer.slice(match.index + match[0].length);
+        const index = match.index ?? 0;
+        consumeGeminiStreamBlock(state.buffer.slice(0, index), state, onDelta);
+        state.buffer = state.buffer.slice(index + match[0].length);
     }
     if (flush && state.buffer.trim()) {
         consumeGeminiStreamBlock(state.buffer, state, onDelta);
@@ -654,6 +702,29 @@ async function requestGeminiImages(config: AiConfig, prompt: string, references:
     return (await Promise.all(requests)).flat();
 }
 
+async function requestApipodImages(config: AiConfig, prompt: string, references: ReferenceImage[], count: number, options?: RequestOptions) {
+    const requests = Array.from({ length: count }, () => requestApipodImagesOnce(config, prompt, references, options));
+    return (await Promise.all(requests)).flat();
+}
+
+async function requestApipodImagesOnce(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
+    const imageUrls = await Promise.all(references.map((image) => imageToDataUrl(image)));
+    const response = await axios.post<ImageApiResponse>(
+        aiApiUrl(config, "/images/generations"),
+        {
+            model: config.model,
+            prompt: withSystemPrompt(config, prompt),
+            ...apipodImageOptions(config),
+            ...(imageUrls.length ? { image_urls: imageUrls } : {}),
+        },
+        {
+            headers: aiHeaders(config, "application/json"),
+            signal: options?.signal,
+        },
+    );
+    return resolveImagePayload(config, response.data, options);
+}
+
 async function requestGeminiImagesOnce(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
     const parts: GeminiPart[] = [{ text: prompt }];
     for (const image of references) {
@@ -696,6 +767,13 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
             throw new Error(readAxiosError(error, "请求失败"));
         }
     }
+    if (isApipodConfig(requestConfig)) {
+        try {
+            return await requestApipodImages(requestConfig, prompt, [], n, options);
+        } catch (error) {
+            throw new Error(readAxiosError(error, "请求失败"));
+        }
+    }
     const quality = normalizeQuality(config.quality);
     const requestSize = resolveRequestSize(quality, config.size);
     try {
@@ -730,6 +808,14 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         if (mask) throw new Error("Gemini 调用格式暂不支持蒙版编辑");
         try {
             return await requestGeminiImages(requestConfig, requestPrompt, references, n, options);
+        } catch (error) {
+            throw new Error(readAxiosError(error, "请求失败"));
+        }
+    }
+    if (isApipodConfig(requestConfig)) {
+        if (mask) throw new Error("APIPod 调用格式暂不支持蒙版编辑");
+        try {
+            return await requestApipodImages(requestConfig, requestPrompt, references, n, options);
         } catch (error) {
             throw new Error(readAxiosError(error, "请求失败"));
         }

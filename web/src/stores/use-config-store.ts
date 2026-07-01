@@ -445,10 +445,14 @@ export function resolveModelRequestConfig(config: AiConfig, value: string) {
     return {
         ...config,
         model: modelOptionName(value || config.model),
-        baseUrl: channel.baseUrl,
+        baseUrl: requestBaseUrlForChannel(channel),
         apiKey: channel.apiKey,
         apiFormat: channel.apiFormat,
     };
+}
+
+function requestBaseUrlForChannel(channel: ModelChannel) {
+    return isApipodChannel(channel) ? "/apipod-proxy" : channel.baseUrl;
 }
 
 function normalizeChannels(config: AiConfig) {
