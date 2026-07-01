@@ -362,13 +362,13 @@ function LoadingContent({ theme }: Pick<NodeContentRendererProps, "theme">) {
 }
 
 function ErrorContent({ node, theme, onRetry }: Pick<NodeContentRendererProps, "node" | "theme" | "onRetry">) {
-    const [taskIdInput, setTaskIdInput] = useState("");
+    const [taskIdInput, setTaskIdInput] = useState(node.metadata?.imageTaskId || "");
     const manualTaskId = taskIdInput.trim();
     return (
         <div className="flex max-w-[260px] flex-col items-center gap-3 px-5 text-center">
             <div className="text-xs leading-5 text-red-300">{node.metadata?.errorDetails || "生成失败"}</div>
             {node.metadata?.imageTaskId ? <div className="max-w-full truncate text-[10px]" style={{ color: theme.node.muted }}>任务 ID：{node.metadata.imageTaskId}</div> : null}
-            {node.type === CanvasNodeType.Image && !node.metadata?.imageTaskId ? (
+            {node.type === CanvasNodeType.Image ? (
                 <div className="flex w-full items-center gap-1.5">
                     <input
                         className="min-w-0 flex-1 rounded-full border bg-transparent px-3 py-1 text-[10px] outline-none"

@@ -3,7 +3,6 @@
 import localforage from "localforage";
 
 import { nanoid } from "nanoid";
-import { readImageMeta } from "@/lib/image-utils";
 
 export type UploadedImage = {
     url: string;
@@ -16,15 +15,15 @@ export type UploadedImage = {
 
 const store = localforage.createInstance({ name: "infinite-canvas", storeName: "image_files" });
 const objectUrls = new Map<string, string>();
+const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 
 export async function uploadImage(input: string | Blob): Promise<UploadedImage> {
-    const blob = typeof input === "string" ? await (await fetch(input)).blob() : input;
+    const blob = typeof input === "string" ? await fetchImageBlob(input) : input;
+    const prepared = await prepareImageBlob(blob);
     const storageKey = `image:${nanoid()}`;
     await store.setItem(storageKey, blob);
-    const url = URL.createObjectURL(blob);
-    objectUrls.set(storageKey, url);
-    const meta = await readImageMeta(url);
-    return { url, storageKey, width: meta.width, height: meta.height, bytes: blob.size, mimeType: blob.type || meta.mimeType };
+    objectUrls.set(storageKey, prepared.url);
+    return { url: prepared.url, storageKey, width: prepared.meta.width, height: prepared.meta.height, bytes: blob.size, mimeType: blob.type || prepared.meta.mimeType };
 }
 
 export async function resolveImageUrl(storageKey?: string, fallback = "") {
@@ -43,16 +42,18 @@ export async function getImageBlob(storageKey: string) {
 }
 
 export async function setImageBlob(storageKey: string, blob: Blob) {
+    const prepared = await prepareImageBlob(blob);
     await store.setItem(storageKey, blob);
-    const url = URL.createObjectURL(blob);
-    objectUrls.set(storageKey, url);
-    return url;
+    objectUrls.set(storageKey, prepared.url);
+    return prepared.url;
 }
 
 export async function imageToDataUrl(image: { url?: string; dataUrl?: string; storageKey?: string }) {
     const url = image.dataUrl || (await resolveImageUrl(image.storageKey, image.url || ""));
     if (!url || url.startsWith("data:")) return url;
-    return blobToDataUrl(await (await fetch(url)).blob());
+    const blob = await fetchImageBlob(url);
+    await validateImageBlob(blob);
+    return blobToDataUrl(blob);
 }
 
 export async function deleteStoredImages(keys: Iterable<string>) {
@@ -88,5 +89,69 @@ function blobToDataUrl(blob: Blob) {
         reader.onload = () => resolve(String(reader.result || ""));
         reader.onerror = () => reject(new Error("读取图片失败"));
         reader.readAsDataURL(blob);
+    });
+}
+
+async function fetchImageBlob(url: string) {
+    const response = await fetch(remoteHttpUrl(url) ? `/media-proxy?url=${encodeURIComponent(url)}` : url);
+    if (!response.ok) throw new Error(await readFetchError(response));
+    return response.blob();
+}
+
+async function readFetchError(response: Response) {
+    try {
+        const data = (await response.json()) as { message?: string };
+        return data.message || `图片下载失败：${response.status}`;
+    } catch {
+        return `图片下载失败：${response.status}`;
+    }
+}
+
+function remoteHttpUrl(value: string) {
+    return /^https?:\/\//i.test(value);
+}
+
+async function prepareImageBlob(blob: Blob) {
+    validateImageBlobShape(blob);
+    const url = URL.createObjectURL(blob);
+    try {
+        const meta = await readImageMetaStrict(url, blob.type || "image/png");
+        return { url, meta };
+    } catch (error) {
+        URL.revokeObjectURL(url);
+        throw error;
+    }
+}
+
+async function validateImageBlob(blob: Blob) {
+    validateImageBlobShape(blob);
+    const url = URL.createObjectURL(blob);
+    try {
+        await readImageMetaStrict(url, blob.type || "image/png");
+    } finally {
+        URL.revokeObjectURL(url);
+    }
+}
+
+function validateImageBlobShape(blob: Blob) {
+    if (blob.size > MAX_IMAGE_BYTES) throw new Error("图片超过大小限制");
+    const mimeType = blob.type.toLowerCase();
+    if (mimeType && mimeType !== "application/octet-stream" && !mimeType.startsWith("image/")) throw new Error("远程地址没有返回图片");
+}
+
+function readImageMetaStrict(url: string, mimeType: string) {
+    return new Promise<{ width: number; height: number; mimeType: string }>((resolve, reject) => {
+        const image = new Image();
+        let done = false;
+        const finish = (fn: () => void) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            fn();
+        };
+        const timer = setTimeout(() => finish(() => reject(new Error("图片读取超时"))), 8000);
+        image.onload = () => finish(() => resolve({ width: image.naturalWidth || 1024, height: image.naturalHeight || 1024, mimeType }));
+        image.onerror = () => finish(() => reject(new Error("远程地址没有返回图片")));
+        image.src = url;
     });
 }

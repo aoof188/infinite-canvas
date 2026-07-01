@@ -10,7 +10,7 @@ import { isImageTaskPendingError, requestEdit, requestGeneration, requestImageQu
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
 import { DOCS_URL } from "@/constant/env";
-import { defaultConfig, type AiConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
+import { decodeChannelModel, encodeChannelModel, defaultConfig, type AiConfig, type ModelChannel, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { resolveImageUrl, uploadImage, type UploadedImage } from "@/services/image-storage";
 import { resolveMediaUrl, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
@@ -2286,33 +2286,37 @@ function InfiniteCanvasPage() {
             const sourceNode = findRetrySourceNode(node.id, nodesRef.current, connectionsRef.current) || node;
             const batchRoot = node.metadata?.batchRootId ? nodesRef.current.find((item) => item.id === node.metadata?.batchRootId) : null;
             const savedImageMetadata = node.type === CanvasNodeType.Image ? { ...batchRoot?.metadata, ...node.metadata } : undefined;
+            const savedImageTaskId = node.type === CanvasNodeType.Image ? savedImageMetadata?.imageTaskId || node.metadata?.imageTaskId : undefined;
             const hasSavedImageMetadata = Boolean(savedImageMetadata?.generationType);
             const generationConfig =
                 hasSavedImageMetadata && savedImageMetadata
                     ? {
                           ...effectiveConfig,
-                          model: savedImageMetadata.model || effectiveConfig.imageModel || effectiveConfig.model,
+                          model: savedImageTaskId ? imageTaskModel(effectiveConfig, savedImageMetadata.model) : savedImageMetadata.model || effectiveConfig.imageModel || effectiveConfig.model,
                           quality: savedImageMetadata.quality || effectiveConfig.quality,
                           size: savedImageMetadata.size || effectiveConfig.size,
                           count: "1",
                       }
-                    : { ...buildGenerationConfig(effectiveConfig, sourceNode, node.type === CanvasNodeType.Text ? "text" : node.type === CanvasNodeType.Video ? "video" : node.type === CanvasNodeType.Audio ? "audio" : "image"), count: "1" };
+                    : {
+                          ...buildGenerationConfig(effectiveConfig, sourceNode, node.type === CanvasNodeType.Text ? "text" : node.type === CanvasNodeType.Video ? "video" : node.type === CanvasNodeType.Audio ? "audio" : "image"),
+                          ...(savedImageTaskId ? { model: imageTaskModel(effectiveConfig, sourceNode.metadata?.model || node.metadata?.model) } : {}),
+                          count: "1",
+                      };
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
                 openConfigDialog(true);
                 return;
             }
 
-            const context = hasSavedImageMetadata ? null : await hydrateNodeGenerationContext(buildNodeGenerationContext(sourceNode.id, nodesRef.current, connectionsRef.current, sourceNode.metadata?.prompt || node.metadata?.prompt || ""));
+            const context = hasSavedImageMetadata || savedImageTaskId ? null : await hydrateNodeGenerationContext(buildNodeGenerationContext(sourceNode.id, nodesRef.current, connectionsRef.current, sourceNode.metadata?.prompt || node.metadata?.prompt || ""));
             const prompt = (savedImageMetadata?.prompt || context?.prompt || "").trim();
-            if (!prompt) {
+            if (!savedImageTaskId && !prompt) {
                 message.warning("找不到提示词，无法重试");
                 return;
             }
             const generationType = savedImageMetadata?.generationType;
-            const savedImageTaskId = node.type === CanvasNodeType.Image ? savedImageMetadata?.imageTaskId || node.metadata?.imageTaskId : undefined;
-            const useReferenceImages = generationType ? generationType === "edit" : Boolean(context?.referenceImages.length);
+            const useReferenceImages = savedImageTaskId ? false : generationType ? generationType === "edit" : Boolean(context?.referenceImages.length);
             const retryReferenceImages =
-                hasSavedImageMetadata && savedImageMetadata ? await resolveMetadataReferences(savedImageMetadata) : useReferenceImages ? (context?.referenceImages.length ? context.referenceImages : sourceNodeReferenceImages(batchRoot || sourceNode)) : [];
+                savedImageTaskId ? [] : hasSavedImageMetadata && savedImageMetadata ? await resolveMetadataReferences(savedImageMetadata) : useReferenceImages ? (context?.referenceImages.length ? context.referenceImages : sourceNodeReferenceImages(batchRoot || sourceNode)) : [];
             if (useReferenceImages && !retryReferenceImages) {
                 message.error("参考图片已丢失，无法继续重试");
                 setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: "参考图片已丢失，无法继续重试" } } : item)));
@@ -2364,6 +2368,7 @@ function InfiniteCanvasPage() {
                 const generationMetadata = savedImageMetadata?.generationType
                     ? { generationType: savedImageMetadata.generationType, model: generationConfig.model, size: generationConfig.size, quality: generationConfig.quality, count: savedImageMetadata.count || 1, references: savedImageMetadata.references }
                     : buildImageGenerationMetadata(useReferenceImages ? "edit" : "generation", generationConfig, 1, retryImages);
+                const promptMetadata = prompt ? { prompt } : {};
                 setNodes((prev) =>
                     prev.map((item) =>
                         item.id === node.id
@@ -2372,7 +2377,7 @@ function InfiniteCanvasPage() {
                                   type: CanvasNodeType.Image,
                                   width: imageSize.width,
                                   height: imageSize.height,
-                                  metadata: { ...item.metadata, ...imageMetadata(uploadedImage), ...taskMetadata, prompt, ...generationMetadata },
+                                  metadata: { ...item.metadata, ...imageMetadata(uploadedImage), ...taskMetadata, ...promptMetadata, ...generationMetadata },
                               }
                             : item,
                     ),
@@ -3079,6 +3084,23 @@ function buildImageGenerationMetadata(type: CanvasImageGenerationType, config: A
         count,
         references: references.map(referenceUrl).filter((url): url is string => Boolean(url)),
     };
+}
+
+function imageTaskModel(config: AiConfig, savedModel?: string) {
+    const decoded = savedModel ? decodeChannelModel(savedModel) : null;
+    if (decoded) {
+        const channel = config.channels.find((item) => item.id === decoded.channelId);
+        if (channel && isApipodChannel(channel)) return savedModel;
+    }
+    const apipodChannel = config.channels.find(isApipodChannel);
+    const savedModelName = (decoded?.model || savedModel || "").trim();
+    const apipodImageModel = (savedModelName && apipodChannel?.models.includes(savedModelName) ? savedModelName : undefined) || apipodChannel?.models.find((model) => /image|seedream|banana/i.test(model)) || apipodChannel?.models[0];
+    return apipodChannel && apipodImageModel ? encodeChannelModel(apipodChannel.id, apipodImageModel) : "";
+}
+
+function isApipodChannel(channel: ModelChannel) {
+    const marker = `${channel.id} ${channel.name} ${channel.baseUrl}`.toLowerCase();
+    return marker.includes("apipod") || marker.includes("api.apipod.ai") || marker.includes("apipod-proxy");
 }
 
 function buildAudioGenerationMetadata(config: AiConfig): CanvasNodeMetadata {
