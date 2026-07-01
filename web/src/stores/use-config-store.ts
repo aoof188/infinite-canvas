@@ -5,6 +5,11 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
+import { filterModelsByCapability, modelMatchesCapability, modelName, type ModelCapability } from "@/lib/model-adapter";
+
+export { filterModelsByCapability, modelMatchesCapability };
+export type { ModelCapability };
+
 export type ApiCallFormat = "openai" | "gemini";
 
 export type ModelChannel = {
@@ -59,7 +64,6 @@ export type WebdavSyncConfig = {
 };
 
 export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
-export type ModelCapability = "image" | "video" | "text" | "audio";
 const CHANNEL_MODEL_SEPARATOR = "::";
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
@@ -245,64 +249,6 @@ type ConfigStore = {
     clearPromptContinue: () => void;
 };
 
-function isVideoModelName(model: string) {
-    const value = modelOptionName(model).toLowerCase();
-    if (value.includes("wan") && value.includes("image")) return false;
-    return (
-        value.includes("seedance") ||
-        value.includes("video") ||
-        value.includes("sora") ||
-        value.includes("veo") ||
-        value.includes("kling") ||
-        value.includes("hailuo") ||
-        value.includes("grok-imagine") ||
-        value.includes("gemini-omni") ||
-        value.includes("t2v") ||
-        value.includes("i2v") ||
-        value.includes("r2v")
-    );
-}
-
-function isImageModelName(model: string) {
-    const value = modelOptionName(model).toLowerCase();
-    return (
-        !isVideoModelName(model) &&
-        !isAudioModelName(model) &&
-        (value.includes("seedream") ||
-            value.includes("gpt-image") ||
-            value.includes("image") ||
-            value.includes("dall-e") ||
-            value.includes("dalle") ||
-            value.includes("imagen") ||
-            value.includes("flux") ||
-            value.includes("sdxl") ||
-            value.includes("stable-diffusion") ||
-            value.includes("midjourney") ||
-            value.includes("nano-banana"))
-    );
-}
-
-function isAudioModelName(model: string) {
-    const value = modelOptionName(model).toLowerCase();
-    return value.includes("audio") || value.includes("tts") || value.includes("speech") || value.includes("voice") || value.includes("music") || value.includes("sound");
-}
-
-function isTextModelName(model: string) {
-    return !isImageModelName(model) && !isVideoModelName(model) && !isAudioModelName(model);
-}
-
-export function modelMatchesCapability(model: string, capability?: ModelCapability) {
-    if (!capability) return true;
-    if (capability === "image") return isImageModelName(model);
-    if (capability === "video") return isVideoModelName(model);
-    if (capability === "audio") return isAudioModelName(model);
-    return isTextModelName(model);
-}
-
-export function filterModelsByCapability(models: string[], capability?: ModelCapability) {
-    return capability ? models.filter((model) => modelMatchesCapability(model, capability)) : models;
-}
-
 export function selectableModelsByCapability(config: AiConfig, capability?: ModelCapability) {
     if (!capability) return config.models;
     return config[modelListKey(capability)];
@@ -456,7 +402,7 @@ export function decodeChannelModel(value: string) {
 }
 
 export function modelOptionName(value: string) {
-    return decodeChannelModel(value)?.model || value;
+    return modelName(value);
 }
 
 export function modelOptionLabel(config: AiConfig, value: string) {

@@ -1,3 +1,4 @@
+import { isSeedanceFastModelName, isSeedanceVideoModelName } from "@/lib/model-adapter";
 import { modelOptionName, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -62,13 +63,11 @@ export function isSeedanceVideoConfig(config: AiConfig | Pick<AiConfig, "model" 
 }
 
 export function isSeedanceVideoModel(model: string) {
-    const value = model.toLowerCase();
-    return value.includes("seedance") || value.includes("doubao-seedance");
+    return isSeedanceVideoModelName(model);
 }
 
 export function isSeedanceFastModel(model: string) {
-    const value = model.toLowerCase();
-    return isSeedanceVideoModel(value) && value.includes("fast");
+    return isSeedanceFastModelName(model);
 }
 
 export function isArkPlanBaseUrl(baseUrl: string) {

@@ -1,6 +1,7 @@
 import axios from "axios";
 
 import { dataUrlToFile } from "@/lib/image-utils";
+import { modelAllowsVideoReferenceMaterial } from "@/lib/model-adapter";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildSeedancePromptText, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceVideoReferenceError, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
@@ -182,13 +183,8 @@ async function createApipodVideoTask(config: AiConfig, model: string, prompt: st
 }
 
 function videoReferencesForModel(model: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[]) {
-    if (isTextToVideoModel(model)) return { references: [], videoReferences: [], audioReferences: [] };
+    if (!modelAllowsVideoReferenceMaterial(model)) return { references: [], videoReferences: [], audioReferences: [] };
     return { references, videoReferences, audioReferences };
-}
-
-function isTextToVideoModel(model: string) {
-    const value = modelOptionName(model).toLowerCase();
-    return value.includes("t2v") && !value.includes("i2v") && !value.includes("r2v");
 }
 
 async function pollSeedanceTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
