@@ -260,7 +260,7 @@ function modelListKey(capability: ModelCapability) {
 
 function isAiConfigReady(config: AiConfig, model: string) {
     const channel = resolveModelChannel(config, model);
-    return Boolean(model.trim() && channel.baseUrl.trim() && channel.apiKey.trim());
+    return Boolean(model.trim() && channel.baseUrl.trim() && apiKeyForChannel(config, channel).trim());
 }
 
 export const useConfigStore = create<ConfigStore>()(
@@ -441,9 +441,17 @@ export function resolveModelRequestConfig(config: AiConfig, value: string) {
         ...config,
         model: modelOptionName(value || config.model),
         baseUrl: requestBaseUrlForChannel(channel),
-        apiKey: channel.apiKey,
+        apiKey: apiKeyForChannel(config, channel),
         apiFormat: channel.apiFormat,
     };
+}
+
+function apiKeyForChannel(config: AiConfig, channel: ModelChannel) {
+    if (channel.apiKey.trim()) return channel.apiKey;
+    if (isApipodChannel(channel)) return channel.apiKey;
+    if (!isArkChannel(channel)) return channel.apiKey;
+    const sharedArkKey = config.channels.find((item) => item.id !== channel.id && isArkChannel(item) && item.apiKey.trim())?.apiKey;
+    return sharedArkKey || "";
 }
 
 function requestBaseUrlForChannel(channel: ModelChannel) {
