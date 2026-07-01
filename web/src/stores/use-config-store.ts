@@ -313,10 +313,10 @@ export const useConfigStore = create<ConfigStore>()(
                 const channels = normalizeChannels(config);
                 const models = modelOptionsFromChannels(channels);
                 const shouldSeedApipodModelOptions = config.apipodModelSeedVersion !== APIPOD_MODEL_SEED_VERSION && channels.some(isApipodChannel);
-                const imageModels = withSeededApipodModelOptions(Array.isArray(persistedConfig.imageModels) ? config.imageModels : filterModelsByCapability(models, "image"), channels, "image", shouldSeedApipodModelOptions);
-                const videoModels = withSeededApipodModelOptions(Array.isArray(persistedConfig.videoModels) ? config.videoModels : filterModelsByCapability(models, "video"), channels, "video", shouldSeedApipodModelOptions);
-                const textModels = withSeededApipodModelOptions(Array.isArray(persistedConfig.textModels) ? config.textModels : filterModelsByCapability(models, "text"), channels, "text", shouldSeedApipodModelOptions);
-                const audioModels = withSeededApipodModelOptions(Array.isArray(persistedConfig.audioModels) ? config.audioModels : filterModelsByCapability(models, "audio"), channels, "audio", shouldSeedApipodModelOptions);
+                const imageModels = normalizeCapabilityModelList(persistedConfig.imageModels, models, channels, "image", shouldSeedApipodModelOptions);
+                const videoModels = normalizeCapabilityModelList(persistedConfig.videoModels, models, channels, "video", shouldSeedApipodModelOptions);
+                const textModels = normalizeCapabilityModelList(persistedConfig.textModels, models, channels, "text", shouldSeedApipodModelOptions);
+                const audioModels = normalizeCapabilityModelList(persistedConfig.audioModels, models, channels, "audio", shouldSeedApipodModelOptions);
                 return {
                     ...current,
                     webdav: { ...defaultWebdavSyncConfig, ...persistedWebdav },
@@ -366,6 +366,13 @@ function withSeededApipodModelOptions(models: string[], channels: ModelChannel[]
         capability,
     );
     return uniqueModelOptions([...normalized, ...apipodOptions]);
+}
+
+function normalizeCapabilityModelList(models: string[] | undefined, allModels: string[], channels: ModelChannel[], capability: ModelCapability, shouldSeedApipodModelOptions: boolean) {
+    const suggested = filterModelsByCapability(allModels, capability);
+    const configured = Array.isArray(models) && models.length ? models : suggested;
+    const normalized = withSeededApipodModelOptions(configured, channels, capability, shouldSeedApipodModelOptions);
+    return normalized.length ? normalized : suggested;
 }
 
 export function useEffectiveConfig() {
@@ -445,14 +452,13 @@ export function resolveModelRequestConfig(config: AiConfig, value: string) {
 }
 
 function normalizeChannels(config: AiConfig) {
-    const shouldSeedApipodModels = config.apipodModelSeedVersion !== APIPOD_MODEL_SEED_VERSION;
     const persistedChannels = Array.isArray(config.channels) ? config.channels : [];
     const channels = persistedChannels.map((channel, index) =>
         createModelChannel({
             ...channel,
             id: channel.id || (index === 0 ? "default" : `channel-${index + 1}`),
             name: channel.name || (index === 0 ? "默认渠道" : `渠道 ${index + 1}`),
-            models: uniqueRawModels([...(channel.models || []), ...(shouldSeedApipodModels && isApipodChannel(channel) ? APIPOD_KNOWN_MODELS : [])]),
+            models: uniqueRawModels([...(channel.models || []), ...(isApipodChannel(channel) ? APIPOD_KNOWN_MODELS : [])]),
         }),
     );
     if (!channels.length) {
