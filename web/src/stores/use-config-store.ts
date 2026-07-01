@@ -447,7 +447,9 @@ export function resolveModelRequestConfig(config: AiConfig, value: string) {
 }
 
 function requestBaseUrlForChannel(channel: ModelChannel) {
-    return isApipodChannel(channel) ? "/apipod-proxy" : channel.baseUrl;
+    if (isApipodChannel(channel)) return "/apipod-proxy";
+    if (isArkChannel(channel)) return arkProxyBaseUrl(channel.baseUrl);
+    return channel.baseUrl;
 }
 
 function normalizeChannels(config: AiConfig, seedArkChannels = false) {
@@ -506,7 +508,16 @@ function isApipodChannel(channel: Partial<ModelChannel>) {
 
 function isArkChannel(channel: Partial<ModelChannel>) {
     const marker = `${channel.id || ""} ${channel.name || ""} ${channel.baseUrl || ""}`.toLowerCase();
-    return marker.includes("volcengine-ark") || marker.includes("火山方舟") || marker.includes("ark.cn-beijing.volces.com");
+    return marker.includes("volcengine-ark") || marker.includes("火山方舟") || marker.includes("ark.cn-beijing.volces.com") || marker.includes("/ark-proxy");
+}
+
+function arkProxyBaseUrl(baseUrl: string) {
+    try {
+        const url = new URL(normalizeArkBaseUrl(baseUrl));
+        return `/ark-proxy${url.pathname.replace(/\/+$/, "") || "/api/v3"}`;
+    } catch {
+        return baseUrl.startsWith("/ark-proxy") ? baseUrl.replace(/\/+$/, "") : baseUrl;
+    }
 }
 
 function normalizeChannelBaseUrl(baseUrl: string) {
@@ -528,20 +539,21 @@ function uniqueModelOptions(models: string[]) {
 
 export function buildApiUrl(baseUrl: string, path: string) {
     let normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
-    normalizedBaseUrl = normalizeArkPlanBaseUrl(normalizedBaseUrl);
+    normalizedBaseUrl = normalizeArkBaseUrl(normalizedBaseUrl);
     const lowerBaseUrl = normalizedBaseUrl.toLowerCase();
     const apiBaseUrl = lowerBaseUrl.endsWith("/v1") || lowerBaseUrl.endsWith("/api/v3") || lowerBaseUrl.endsWith("/api/plan/v3") ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`;
     return `${apiBaseUrl}${path}`;
 }
 
-function normalizeArkPlanBaseUrl(baseUrl: string) {
+function normalizeArkBaseUrl(baseUrl: string) {
     try {
         const url = new URL(baseUrl);
         const path = url.pathname.replace(/\/+$/, "");
         const lowerPath = path.toLowerCase();
-        const arkPlanIndex = lowerPath.indexOf("/api/plan/v3");
-        if (arkPlanIndex < 0) return baseUrl;
-        const end = arkPlanIndex + "/api/plan/v3".length;
+        const arkApiPath = lowerPath.includes("/api/plan/v3") ? "/api/plan/v3" : lowerPath.includes("/api/v3") ? "/api/v3" : "";
+        if (!arkApiPath) return baseUrl;
+        const arkApiIndex = lowerPath.indexOf(arkApiPath);
+        const end = arkApiIndex + arkApiPath.length;
         if (lowerPath.length !== end && lowerPath[end] !== "/") return baseUrl;
         url.pathname = path.slice(0, end);
         url.search = "";
