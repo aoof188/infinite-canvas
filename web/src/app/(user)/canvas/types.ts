@@ -27,6 +27,8 @@ export type CanvasNodeMetadata = {
     prompt?: string;
     status?: CanvasNodeStatus;
     errorDetails?: string;
+    imageTaskId?: string;
+    imageTaskStatus?: "processing" | "completed" | "failed" | "timeout";
     fontSize?: number;
     generationMode?: CanvasGenerationMode;
     generationType?: CanvasImageGenerationType;

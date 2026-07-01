@@ -75,8 +75,11 @@ type ImageApiResponse = {
 };
 type ImageTaskData = {
     task_id?: string;
-    status?: "pending" | "processing" | "completed" | "failed" | "cancelled";
-    result?: Array<string | Record<string, unknown>>;
+    status?: string;
+    result?: unknown;
+    results?: unknown;
+    output?: unknown;
+    images?: unknown;
     error?: string | { message?: string };
     code?: number;
     message?: string;
@@ -99,7 +102,22 @@ type GeminiPayload = {
     promptFeedback?: { blockReason?: string };
 };
 type GeminiStreamState = { buffer: string; text: string; toolCalls: ResponseToolCall[]; error?: string };
-type RequestOptions = { signal?: AbortSignal };
+type RequestOptions = { signal?: AbortSignal; onImageTask?: (taskId: string) => void; taskPollAttempts?: number };
+export type GeneratedImage = { id: string; dataUrl: string; taskId?: string };
+
+export class ImageTaskPendingError extends Error {
+    taskId: string;
+
+    constructor(taskId: string) {
+        super(`远程图片任务仍在处理中，任务 ID：${taskId}。稍后点击重试可继续拉取结果。`);
+        this.name = "ImageTaskPendingError";
+        this.taskId = taskId;
+    }
+}
+
+export function isImageTaskPendingError(error: unknown): error is ImageTaskPendingError {
+    return error instanceof ImageTaskPendingError;
+}
 
 const QUALITY_BASE: Record<string, number> = {
     low: 1024,
@@ -127,6 +145,8 @@ const IMAGE_MAX_PIXELS = 8294400;
 const IMAGE_MAX_EDGE = 3840;
 const IMAGE_MAX_RATIO = 3;
 const IMAGE_OUTPUT_FORMAT = "png";
+const IMAGE_TASK_FAST_POLLS = 12;
+const IMAGE_TASK_DEFAULT_POLLS = 360;
 
 function normalizeQuality(quality: string) {
     const value = quality.trim().toLowerCase();
@@ -242,10 +262,19 @@ function resolveImageDataUrl(item: Record<string, unknown>) {
     if (typeof item.url === "string" && item.url) {
         return item.url;
     }
+    if (typeof item.image_url === "string" && item.image_url) {
+        return item.image_url;
+    }
+    if (typeof item.result_url === "string" && item.result_url) {
+        return item.result_url;
+    }
+    if (typeof item.download_url === "string" && item.download_url) {
+        return item.download_url;
+    }
     return null;
 }
 
-function parseImagePayload(payload: ImageApiResponse) {
+function parseImagePayload(payload: ImageApiResponse): GeneratedImage[] {
     validateImagePayload(payload);
     if (!Array.isArray(payload.data)) throw new Error("接口没有返回图片");
     const images =
@@ -261,10 +290,13 @@ function parseImagePayload(payload: ImageApiResponse) {
     return images;
 }
 
-async function resolveImagePayload(config: AiConfig, payload: ImageApiResponse, options?: RequestOptions) {
+async function resolveImagePayload(config: AiConfig, payload: ImageApiResponse, options?: RequestOptions): Promise<GeneratedImage[]> {
     validateImagePayload(payload);
     const task = taskData(payload.data);
-    if (task?.task_id) return pollImageTask(config, task.task_id, options, task);
+    if (task?.task_id) {
+        options?.onImageTask?.(task.task_id);
+        return pollImageTask(config, task.task_id, options, task);
+    }
     return parseImagePayload(payload);
 }
 
@@ -279,15 +311,17 @@ function taskData(value: ImageApiResponse["data"]) {
     return value && !Array.isArray(value) ? value : null;
 }
 
-async function pollImageTask(config: AiConfig, taskId: string, options?: RequestOptions, initialTask?: ImageTaskData) {
-    for (let attempt = 0; attempt < 120; attempt += 1) {
+async function pollImageTask(config: AiConfig, taskId: string, options?: RequestOptions, initialTask?: ImageTaskData): Promise<GeneratedImage[]> {
+    const maxAttempts = options?.taskPollAttempts || IMAGE_TASK_DEFAULT_POLLS;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const task = attempt === 0 && initialTask?.status ? initialTask : await queryImageTask(config, taskId, options);
-        if (task.status === "completed") return imageTaskResults(task);
-        if (task.status === "failed" || task.status === "cancelled") throw new Error(imageTaskError(task, task.status === "cancelled" ? "图片生成已取消" : "图片生成失败"));
-        await delay(attempt < 12 ? 2500 : 5000, options?.signal);
+        const status = imageTaskStatus(task);
+        if (status === "completed") return imageTaskResults(task, taskId);
+        if (status === "failed" || status === "cancelled") throw new Error(imageTaskError(task, status === "cancelled" ? "图片生成已取消" : "图片生成失败"));
+        await delay(attempt < IMAGE_TASK_FAST_POLLS ? 2500 : 5000, options?.signal);
     }
-    throw new Error("图片生成超时，请稍后重试");
+    throw new ImageTaskPendingError(taskId);
 }
 
 async function queryImageTask(config: AiConfig, taskId: string, options?: RequestOptions) {
@@ -298,12 +332,34 @@ async function queryImageTask(config: AiConfig, taskId: string, options?: Reques
     return task;
 }
 
-function imageTaskResults(task: ImageTaskData) {
+function imageTaskStatus(task: ImageTaskData): "pending" | "processing" | "completed" | "failed" | "cancelled" {
+    if (imageTaskResultItems(task).length) return "completed";
+    const status = String(task.status || "").toLowerCase();
+    if (["completed", "complete", "success", "succeeded", "finished", "done"].includes(status)) return "completed";
+    if (["failed", "failure", "error"].includes(status)) return "failed";
+    if (["cancelled", "canceled"].includes(status)) return "cancelled";
+    if (["pending", "queued", "created"].includes(status)) return "pending";
+    return "processing";
+}
+
+function imageTaskResultItems(task: ImageTaskData) {
+    const value = task.result || task.results || task.output || task.images;
+    if (!value) return [];
+    return Array.isArray(value) ? value : [value];
+}
+
+function imageTaskResultUrl(item: unknown) {
+    if (typeof item === "string") return item;
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    return resolveImageDataUrl(item as Record<string, unknown>);
+}
+
+function imageTaskResults(task: ImageTaskData, taskId: string): GeneratedImage[] {
     const images =
-        task.result
-            ?.map((item) => (typeof item === "string" ? item : resolveImageDataUrl(item)))
+        imageTaskResultItems(task)
+            .map(imageTaskResultUrl)
             .filter((value): value is string => Boolean(value))
-            .map((dataUrl) => ({ id: nanoid(), dataUrl })) || [];
+            .map((dataUrl) => ({ id: nanoid(), dataUrl, taskId })) || [];
     if (!images.length) throw new Error("图片任务完成但没有返回图片");
     return images;
 }
@@ -771,6 +827,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
         try {
             return await requestApipodImages(requestConfig, prompt, [], n, options);
         } catch (error) {
+            if (isImageTaskPendingError(error)) throw error;
             throw new Error(readAxiosError(error, "请求失败"));
         }
     }
@@ -796,6 +853,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
         const images = await resolveImagePayload(requestConfig, response.data, options);
         return images;
     } catch (error) {
+        if (isImageTaskPendingError(error)) throw error;
         throw new Error(readAxiosError(error, "请求失败"));
     }
 }
@@ -817,6 +875,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         try {
             return await requestApipodImages(requestConfig, requestPrompt, references, n, options);
         } catch (error) {
+            if (isImageTaskPendingError(error)) throw error;
             throw new Error(readAxiosError(error, "请求失败"));
         }
     }
@@ -843,6 +902,17 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         const images = await resolveImagePayload(requestConfig, response.data, options);
         return images;
     } catch (error) {
+        if (isImageTaskPendingError(error)) throw error;
+        throw new Error(readAxiosError(error, "请求失败"));
+    }
+}
+
+export async function requestImageTaskResult(config: AiConfig, taskId: string, options?: RequestOptions) {
+    const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
+    try {
+        return await pollImageTask(requestConfig, taskId, options);
+    } catch (error) {
+        if (isImageTaskPendingError(error)) throw error;
         throw new Error(readAxiosError(error, "请求失败"));
     }
 }
