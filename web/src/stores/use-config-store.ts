@@ -52,6 +52,7 @@ export type AiConfig = {
     canvasImageCount: string;
     apipodModelSeedVersion: string;
     arkModelSeedVersion: string;
+    klingModelSeedVersion: string;
 };
 
 export type WebdavSyncConfig = {
@@ -69,8 +70,10 @@ const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 const VOLCENGINE_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
 const VOLCENGINE_ARK_PLAN_BASE_URL = "https://ark.cn-beijing.volces.com/api/plan/v3";
+const KLING_BASE_URL = "https://api-singapore.klingai.com";
 const APIPOD_MODEL_SEED_VERSION = "2026-07-01";
 const ARK_MODEL_SEED_VERSION = "2026-07-01-standard-video";
+const KLING_MODEL_SEED_VERSION = "2026-07-01-video";
 // APIPod does not expose every multimodal model through /v1/models, so keep this local seed list for the config UI.
 const APIPOD_KNOWN_MODELS = [
     "gpt-image-2",
@@ -148,19 +151,14 @@ const APIPOD_KNOWN_MODELS = [
     "gpt-4o-mini-tts",
 ];
 const ARK_KNOWN_MODELS = [
-    "doubao-seed-2-0-pro-260215",
-    "doubao-seed-2-0-lite-260428",
-    "doubao-seed-1-6-251015",
-    "doubao-seed-1-6-thinking-251015",
-    "doubao-seedream-5-0-260128",
-    "doubao-seedream-5-0-lite-260128",
-    "doubao-seedream-4-5-251128",
-    "doubao-seedream-4-0-250828",
+    "doubao-seedance-1-0-lite-i2v-250428",
+    "doubao-seedance-1-0-lite-t2v-250428",
+    "doubao-seedance-1-0-pro-250528",
+    "doubao-seedance-1-0-pro-fast-251015",
+    "doubao-seedance-1-5-pro-251215",
     "doubao-seedance-2-0-260128",
     "doubao-seedance-2-0-fast-260128",
-    "doubao-seedance-1-0-pro-250528",
-    "doubao-seedance-1-0-lite-t2v-250428",
-    "doubao-seedance-1-0-lite-i2v-250428",
+    "doubao-seedance-2-0-mini-260615",
 ];
 const ARK_PLAN_KNOWN_MODELS = [
     "doubao-seedance-2-0-260128",
@@ -168,6 +166,26 @@ const ARK_PLAN_KNOWN_MODELS = [
     "doubao-seedance-1-0-pro-250528",
     "doubao-seedance-1-0-lite-t2v-250428",
     "doubao-seedance-1-0-lite-i2v-250428",
+];
+const KLING_KNOWN_MODELS = [
+    "kling-v3.0-t2v",
+    "kling-v3.0-i2v",
+    "kling-v2.6-t2v",
+    "kling-v2.6-i2v",
+    "kling-v2.6-motion-control",
+    "kling-v3.0-motion-control",
+    "kling-v2.5-turbo-t2v",
+    "kling-v2.5-turbo-i2v",
+    "kling-v2.1-master-t2v",
+    "kling-v2.1-master-i2v",
+    "kling-v2.1-i2v",
+    "kling-v2-master-t2v",
+    "kling-v2-master-i2v",
+    "kling-v1.6-t2v",
+    "kling-v1.6-i2v",
+    "kling-v1.5-i2v",
+    "kling-v1-t2v",
+    "kling-v1-i2v",
 ];
 const ARK_SEED_CHANNELS: ModelChannel[] = [
     {
@@ -187,6 +205,14 @@ const ARK_SEED_CHANNELS: ModelChannel[] = [
         models: ARK_PLAN_KNOWN_MODELS,
     },
 ];
+const KLING_SEED_CHANNEL: ModelChannel = {
+    id: "kling",
+    name: "可灵",
+    baseUrl: KLING_BASE_URL,
+    apiKey: "",
+    apiFormat: "openai",
+    models: KLING_KNOWN_MODELS,
+};
 const DEFAULT_OPENAI_CHANNEL: ModelChannel = {
     id: "default",
     name: "默认渠道",
@@ -196,7 +222,7 @@ const DEFAULT_OPENAI_CHANNEL: ModelChannel = {
     models: ["gpt-image-2", "grok-imagine-video", "gpt-5.5", "gpt-4o-mini-tts"],
 };
 const DEFAULT_OPENAI_MODELS = DEFAULT_OPENAI_CHANNEL.models;
-const DEFAULT_CHANNELS = [DEFAULT_OPENAI_CHANNEL, ...ARK_SEED_CHANNELS];
+const DEFAULT_CHANNELS = [DEFAULT_OPENAI_CHANNEL, ARK_SEED_CHANNELS[0], KLING_SEED_CHANNEL];
 const DEFAULT_MODEL_OPTIONS = modelOptionsFromChannels(DEFAULT_CHANNELS);
 
 export const defaultConfig: AiConfig = {
@@ -230,6 +256,7 @@ export const defaultConfig: AiConfig = {
     canvasImageCount: "3",
     apipodModelSeedVersion: "",
     arkModelSeedVersion: "",
+    klingModelSeedVersion: "",
 };
 
 export const defaultWebdavSyncConfig: WebdavSyncConfig = {
@@ -304,14 +331,16 @@ export const useConfigStore = create<ConfigStore>()(
                 const config = { ...defaultConfig, ...persistedConfig };
                 if (!Array.isArray(persistedConfig.channels)) config.channels = [];
                 const shouldSeedArkChannels = config.arkModelSeedVersion !== ARK_MODEL_SEED_VERSION;
-                const channels = normalizeChannels(config, shouldSeedArkChannels);
+                const shouldSeedKlingChannels = config.klingModelSeedVersion !== KLING_MODEL_SEED_VERSION;
+                const channels = normalizeChannels(config, shouldSeedArkChannels, shouldSeedKlingChannels);
                 const models = modelOptionsFromChannels(channels);
                 const shouldSeedApipodModelOptions = config.apipodModelSeedVersion !== APIPOD_MODEL_SEED_VERSION && channels.some(isApipodChannel);
-                const shouldSeedArkModelOptions = shouldSeedArkChannels && channels.some(isArkChannel);
-                const imageModels = normalizeCapabilityModelList(persistedConfig.imageModels, models, channels, "image", shouldSeedApipodModelOptions, shouldSeedArkModelOptions);
-                const videoModels = normalizeCapabilityModelList(persistedConfig.videoModels, models, channels, "video", shouldSeedApipodModelOptions, shouldSeedArkModelOptions);
-                const textModels = normalizeCapabilityModelList(persistedConfig.textModels, models, channels, "text", shouldSeedApipodModelOptions, shouldSeedArkModelOptions);
-                const audioModels = normalizeCapabilityModelList(persistedConfig.audioModels, models, channels, "audio", shouldSeedApipodModelOptions, shouldSeedArkModelOptions);
+                const shouldSeedArkModelOptions = shouldSeedArkChannels && channels.some((channel) => isArkChannel(channel) && !isArkPlanChannel(channel));
+                const shouldSeedKlingModelOptions = shouldSeedKlingChannels && channels.some(isKlingChannel);
+                const imageModels = normalizeCapabilityModelList(persistedConfig.imageModels, models, channels, "image", shouldSeedApipodModelOptions, shouldSeedArkModelOptions, shouldSeedKlingModelOptions);
+                const videoModels = normalizeCapabilityModelList(persistedConfig.videoModels, models, channels, "video", shouldSeedApipodModelOptions, shouldSeedArkModelOptions, shouldSeedKlingModelOptions);
+                const textModels = normalizeCapabilityModelList(persistedConfig.textModels, models, channels, "text", shouldSeedApipodModelOptions, shouldSeedArkModelOptions, shouldSeedKlingModelOptions);
+                const audioModels = normalizeCapabilityModelList(persistedConfig.audioModels, models, channels, "audio", shouldSeedApipodModelOptions, shouldSeedArkModelOptions, shouldSeedKlingModelOptions);
                 return {
                     ...current,
                     webdav: { ...defaultWebdavSyncConfig, ...persistedWebdav },
@@ -340,6 +369,7 @@ export const useConfigStore = create<ConfigStore>()(
                         audioModels,
                         apipodModelSeedVersion: shouldSeedApipodModelOptions ? APIPOD_MODEL_SEED_VERSION : config.apipodModelSeedVersion || "",
                         arkModelSeedVersion: shouldSeedArkChannels ? ARK_MODEL_SEED_VERSION : config.arkModelSeedVersion || "",
+                        klingModelSeedVersion: shouldSeedKlingChannels ? KLING_MODEL_SEED_VERSION : config.klingModelSeedVersion || "",
                     },
                 };
             },
@@ -354,24 +384,28 @@ function normalizeModelList(models: string[], channels: ModelChannel[]) {
         .filter((model) => !allModelOptions.length || allModelOptions.includes(model) || !isChannelModelValue(model));
 }
 
-function withSeededProviderModelOptions(models: string[], channels: ModelChannel[], capability: ModelCapability, shouldSeedApipod: boolean, shouldSeedArk: boolean) {
+function withSeededProviderModelOptions(models: string[], channels: ModelChannel[], capability: ModelCapability, shouldSeedApipod: boolean, shouldSeedArk: boolean, shouldSeedKling: boolean) {
     const normalized = normalizeModelList(models, channels);
-    if (!shouldSeedApipod && !shouldSeedArk) return normalized;
+    if (!shouldSeedApipod && !shouldSeedArk && !shouldSeedKling) return normalized;
     const apipodOptions = filterModelsByCapability(
         shouldSeedApipod ? channels.filter(isApipodChannel).flatMap((channel) => channel.models.map((model) => encodeChannelModel(channel.id, model))) : [],
         capability,
     );
     const arkOptions = filterModelsByCapability(
-        shouldSeedArk ? channels.filter(isArkChannel).flatMap((channel) => channel.models.map((model) => encodeChannelModel(channel.id, model))) : [],
+        shouldSeedArk ? channels.filter((channel) => isArkChannel(channel) && !isArkPlanChannel(channel)).flatMap((channel) => channel.models.map((model) => encodeChannelModel(channel.id, model))) : [],
         capability,
     );
-    return uniqueModelOptions([...normalized, ...apipodOptions, ...arkOptions]);
+    const klingOptions = filterModelsByCapability(
+        shouldSeedKling ? channels.filter(isKlingChannel).flatMap((channel) => channel.models.map((model) => encodeChannelModel(channel.id, model))) : [],
+        capability,
+    );
+    return uniqueModelOptions([...normalized, ...apipodOptions, ...arkOptions, ...klingOptions]);
 }
 
-function normalizeCapabilityModelList(models: string[] | undefined, allModels: string[], channels: ModelChannel[], capability: ModelCapability, shouldSeedApipodModelOptions: boolean, shouldSeedArkModelOptions: boolean) {
+function normalizeCapabilityModelList(models: string[] | undefined, allModels: string[], channels: ModelChannel[], capability: ModelCapability, shouldSeedApipodModelOptions: boolean, shouldSeedArkModelOptions: boolean, shouldSeedKlingModelOptions: boolean) {
     const suggested = filterModelsByCapability(allModels, capability);
     const configured = Array.isArray(models) && models.length ? models : suggested;
-    const normalized = withSeededProviderModelOptions(configured, channels, capability, shouldSeedApipodModelOptions, shouldSeedArkModelOptions);
+    const normalized = withSeededProviderModelOptions(configured, channels, capability, shouldSeedApipodModelOptions, shouldSeedArkModelOptions, shouldSeedKlingModelOptions);
     return normalized.length ? normalized : suggested;
 }
 
@@ -462,10 +496,11 @@ function apiKeyForChannel(config: AiConfig, channel: ModelChannel) {
 function requestBaseUrlForChannel(channel: ModelChannel) {
     if (isApipodChannel(channel)) return "/apipod-proxy";
     if (isArkChannel(channel)) return arkProxyBaseUrl(channel.baseUrl);
+    if (isKlingChannel(channel)) return "/kling-proxy";
     return channel.baseUrl;
 }
 
-function normalizeChannels(config: AiConfig, seedArkChannels = false) {
+function normalizeChannels(config: AiConfig, seedArkChannels = false, seedKlingChannels = false) {
     const persistedChannels = Array.isArray(config.channels) ? config.channels : [];
     const channels = persistedChannels.map((channel, index) =>
         createModelChannel({
@@ -491,10 +526,17 @@ function normalizeChannels(config: AiConfig, seedArkChannels = false) {
     if (seedArkChannels) {
         const existingIds = new Set(channels.map((channel) => channel.id));
         const existingBaseUrls = new Set(channels.map((channel) => normalizeChannelBaseUrl(channel.baseUrl)));
-        for (const seedChannel of ARK_SEED_CHANNELS) {
+        for (const seedChannel of ARK_SEED_CHANNELS.filter((channel) => !isArkPlanChannel(channel))) {
             if (existingIds.has(seedChannel.id)) continue;
             if (existingBaseUrls.has(normalizeChannelBaseUrl(seedChannel.baseUrl))) continue;
             channels.push(createModelChannel(seedChannel));
+        }
+    }
+    if (seedKlingChannels) {
+        const existingIds = new Set(channels.map((channel) => channel.id));
+        const existingBaseUrls = new Set(channels.map((channel) => normalizeChannelBaseUrl(channel.baseUrl)));
+        if (!existingIds.has(KLING_SEED_CHANNEL.id) && !existingBaseUrls.has(normalizeChannelBaseUrl(KLING_SEED_CHANNEL.baseUrl))) {
+            channels.push(createModelChannel(KLING_SEED_CHANNEL));
         }
     }
     return channels.map((channel) => ({ ...channel, models: uniqueRawModels(channel.models) }));
@@ -516,13 +558,20 @@ function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
 
 function seedModelsForChannel(channel: Partial<ModelChannel>) {
     if (isApipodChannel(channel)) return APIPOD_KNOWN_MODELS;
+    if (isKlingChannel(channel)) return KLING_KNOWN_MODELS;
     if (!isArkChannel(channel)) return [];
-    return isArkPlanChannel(channel) ? ARK_PLAN_KNOWN_MODELS : ARK_KNOWN_MODELS;
+    if (isArkPlanChannel(channel)) return [];
+    return ARK_KNOWN_MODELS;
 }
 
 function isApipodChannel(channel: Partial<ModelChannel>) {
     const marker = `${channel.id || ""} ${channel.name || ""} ${channel.baseUrl || ""}`.toLowerCase();
     return marker.includes("apipod") || marker.includes("api.apipod.ai") || marker.includes("apipod-proxy");
+}
+
+function isKlingChannel(channel: Partial<ModelChannel>) {
+    const marker = `${channel.id || ""} ${channel.name || ""} ${channel.baseUrl || ""}`.toLowerCase();
+    return marker.includes("kling") || marker.includes("可灵") || marker.includes("api-singapore.klingai.com");
 }
 
 function isArkChannel(channel: Partial<ModelChannel>) {

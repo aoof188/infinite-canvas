@@ -27,11 +27,21 @@ type ApipodTask = {
     msg?: string;
     error?: { message?: string } | string | null;
 };
+type KlingTask = {
+    code?: number;
+    message?: string;
+    data?: {
+        task_id?: string;
+        task_status?: "submitted" | "processing" | "succeed" | "failed" | string;
+        task_status_msg?: string;
+        task_result?: { videos?: Array<{ id?: string; url?: string; watermark_url?: string; duration?: string }> };
+    } | null;
+};
 type ApiEnvelope<T> = T | { code?: number; data?: T | null; msg?: string };
 type RequestOptions = { signal?: AbortSignal };
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
-export type VideoGenerationTask = { id: string; provider: "openai" | "seedance" | "apipod"; model: string };
+export type VideoGenerationTask = { id: string; provider: "openai" | "seedance" | "apipod" | "kling"; model: string; endpoint?: string };
 export type VideoGenerationTaskState = { status: "pending" } | { status: "completed"; result: VideoGenerationResult } | { status: "failed"; error: string };
 
 function aiApiUrl(config: AiConfig, path: string) {
@@ -47,13 +57,13 @@ function aiHeaders(config: AiConfig, contentType?: string) {
 
 export async function requestVideoGeneration(config: AiConfig, prompt: string, references: ReferenceImage[] = [], videoReferences: ReferenceVideo[] = [], audioReferences: ReferenceAudio[] = [], options?: RequestOptions): Promise<VideoGenerationResult> {
     const task = await createVideoGenerationTask(config, prompt, references, videoReferences, audioReferences, options);
-    const delayMs = task.provider === "seedance" || task.provider === "apipod" ? 5000 : 2500;
+    const delayMs = task.provider === "seedance" || task.provider === "apipod" || task.provider === "kling" ? 5000 : 2500;
     for (let attempt = 0; attempt < 120; attempt += 1) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const state = await pollVideoGenerationTask(config, task, options);
         if (state.status === "completed") return state.result;
         if (state.status === "failed") throw new Error(state.error);
-        if (attempt === 119) throw new Error(`${task.provider === "seedance" ? "Seedance " : task.provider === "apipod" ? "APIPod " : ""}视频生成超时，请稍后重试`);
+        if (attempt === 119) throw new Error(`${task.provider === "seedance" ? "Seedance " : task.provider === "apipod" ? "APIPod " : task.provider === "kling" ? "可灵 " : ""}视频生成超时，请稍后重试`);
         await delay(delayMs, options?.signal);
     }
     throw new Error("视频生成超时，请稍后重试");
@@ -65,6 +75,9 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     assertVideoConfig(requestConfig, requestConfig.model);
     if (isApipodConfig(requestConfig)) {
         return createApipodVideoTask(requestConfig, selectedModel, prompt, references, videoReferences, audioReferences, options);
+    }
+    if (isKlingConfig(requestConfig)) {
+        return createKlingVideoTask(requestConfig, selectedModel, prompt, references, videoReferences, options);
     }
     if (isSeedanceVideoConfig(requestConfig)) {
         return createSeedanceTask(requestConfig, selectedModel, prompt, references, videoReferences, audioReferences, options);
@@ -79,6 +92,7 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
     const requestConfig = resolveModelRequestConfig(config, task.model);
     assertVideoConfig(requestConfig, requestConfig.model);
     if (task.provider === "apipod") return pollApipodVideoTask(requestConfig, task, options);
+    if (task.provider === "kling") return pollKlingVideoTask(requestConfig, task, options);
     return task.provider === "seedance" ? pollSeedanceTask(requestConfig, task, options) : pollOpenAIVideoTask(requestConfig, task, options);
 }
 
@@ -182,6 +196,20 @@ async function createApipodVideoTask(config: AiConfig, model: string, prompt: st
     }
 }
 
+async function createKlingVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    const modelId = modelOptionName(model);
+    const mode = klingVideoMode(modelId);
+    const endpoint = klingEndpoint(mode, references.length);
+    const payload = await buildKlingPayload(config, modelId, mode, prompt, references, videoReferences);
+    try {
+        const created = unwrapKlingTask((await axios.post<KlingTask>(aiApiUrl(config, endpoint), payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data);
+        if (!created.task_id) throw new Error("可灵接口没有返回任务 ID");
+        return { id: created.task_id, provider: "kling", model, endpoint };
+    } catch (error) {
+        throw new Error(readAxiosError(error, "可灵任务创建失败"));
+    }
+}
+
 function videoReferencesForModel(model: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[]) {
     if (!modelAllowsVideoReferenceMaterial(model)) return { references: [], videoReferences: [], audioReferences: [] };
     return { references, videoReferences, audioReferences };
@@ -217,6 +245,22 @@ async function pollApipodVideoTask(config: AiConfig, task: VideoGenerationTask, 
     }
 }
 
+async function pollKlingVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
+    try {
+        const endpoint = task.endpoint || klingEndpoint(klingVideoMode(modelOptionName(task.model)), 1);
+        const state = unwrapKlingTask((await axios.get<KlingTask>(aiApiUrl(config, `${endpoint}/${encodeURIComponent(task.id)}`), { headers: aiHeaders(config), signal: options?.signal })).data);
+        if (state.task_status === "succeed") {
+            const url = state.task_result?.videos?.find((video) => video.url)?.url;
+            if (!url) return { status: "failed", error: "可灵任务成功但没有返回视频 URL" };
+            return { status: "completed", result: await videoResultFromUrl(url, options) };
+        }
+        if (state.task_status === "failed") return { status: "failed", error: state.task_status_msg || "可灵视频生成失败" };
+        return { status: "pending" };
+    } catch (error) {
+        throw new Error(readAxiosError(error, "可灵任务查询失败"));
+    }
+}
+
 function assertSeedanceVideoReferences(videoReferences: ReferenceVideo[]) {
     const error = seedanceVideoReferenceError(videoReferences);
     if (error) throw new Error(error);
@@ -246,6 +290,79 @@ function seedanceApiUrl(config: AiConfig, taskId?: string) {
 function isApipodConfig(config: Pick<AiConfig, "baseUrl">) {
     const value = config.baseUrl.trim().toLowerCase();
     return value.includes("apipod") || value.includes("/apipod-proxy");
+}
+
+function isKlingConfig(config: Pick<AiConfig, "baseUrl">) {
+    const value = config.baseUrl.trim().toLowerCase();
+    return value.includes("klingai.com") || value.includes("/kling-proxy");
+}
+
+async function buildKlingPayload(config: AiConfig, modelId: string, mode: "t2v" | "i2v" | "motion-control", prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[]) {
+    const modelName = klingApiModelName(modelId, mode);
+    const duration = normalizeKlingDuration(config.videoSeconds);
+    const common = klingCommonOptions(config, modelId);
+    if (mode === "t2v") {
+        if (references.length || videoReferences.length) throw new Error("可灵文生视频模型不支持参考素材，请切换到 i2v 或 motion-control 模型");
+        return { model_name: modelName, prompt, aspect_ratio: normalizeKlingAspectRatio(config.size), duration, ...common };
+    }
+    if (mode === "motion-control") {
+        const image = references[0];
+        const video = videoReferences[0];
+        if (!image || !video) throw new Error("可灵 motion-control 需要连接 1 张角色图和 1 个参考动作视频");
+        if (!isPublicMediaUrl(video.url)) throw new Error("可灵 motion-control 的参考视频需要公网 URL");
+        return { model_name: modelName, prompt, image_url: await klingImageValue(config, image), video_url: video.url, character_orientation: "image", mode: "std", keep_original_sound: boolConfig(config.videoGenerateAudio, true) ? "yes" : "no", watermark_info: common.watermark_info };
+    }
+    if (!references.length) throw new Error("可灵图生视频模型需要至少 1 张参考图");
+    if (references.length > 1) {
+        return { model_name: modelName, prompt, image_list: await Promise.all(references.slice(0, 4).map(async (image) => ({ image: await klingImageValue(config, image) }))), aspect_ratio: normalizeKlingAspectRatio(config.size), duration, ...common };
+    }
+    return { model_name: modelName, prompt, image: await klingImageValue(config, references[0]), duration, ...common };
+}
+
+function klingVideoMode(modelId: string): "t2v" | "i2v" | "motion-control" {
+    if (modelId.endsWith("-t2v")) return "t2v";
+    if (modelId.endsWith("-i2v")) return "i2v";
+    if (modelId.endsWith("-motion-control")) return "motion-control";
+    throw new Error("可灵模型名称需以 -t2v、-i2v 或 -motion-control 结尾");
+}
+
+function klingEndpoint(mode: "t2v" | "i2v" | "motion-control", referenceImageCount: number) {
+    if (mode === "t2v") return "/videos/text2video";
+    if (mode === "motion-control") return "/videos/motion-control";
+    return referenceImageCount > 1 ? "/videos/multi-image2video" : "/videos/image2video";
+}
+
+function klingApiModelName(modelId: string, mode: "t2v" | "i2v" | "motion-control") {
+    const suffix = mode === "motion-control" ? "-motion-control" : `-${mode}`;
+    return modelId.slice(0, -suffix.length).replace(/\.0$/, "").replace(/\./g, "-");
+}
+
+async function klingImageValue(config: AiConfig, image: ReferenceImage) {
+    const directUrl = image.url || image.dataUrl;
+    if (isPublicMediaUrl(directUrl)) return directUrl;
+    const dataUrl = await imageToDataUrl(image);
+    if (!dataUrl) throw new Error("可灵参考图读取失败，请换一张图片或重新上传");
+    return dataUrl.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "");
+}
+
+function normalizeKlingAspectRatio(value: string) {
+    const ratio = normalizeSeedanceRatio(value);
+    return ["16:9", "9:16", "1:1"].includes(ratio) ? ratio : "16:9";
+}
+
+function normalizeKlingDuration(value: string) {
+    return Number(value) >= 10 ? "10" : "5";
+}
+
+function klingCommonOptions(config: AiConfig, modelId: string) {
+    return {
+        ...(modelSupportsKlingSound(modelId) ? { sound: boolConfig(config.videoGenerateAudio, true) ? "on" : "off" } : {}),
+        watermark_info: { enabled: boolConfig(config.videoWatermark, false) },
+    };
+}
+
+function modelSupportsKlingSound(modelId: string) {
+    return /kling-v(2\.6|3\.0)/.test(modelId);
 }
 
 async function buildSeedanceContent(config: AiConfig, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[]) {
@@ -343,6 +460,13 @@ function unwrapApipodTask(payload: ApiEnvelope<ApipodTask>) {
         throw new Error("APIPod 接口没有返回任务");
     }
     return payload as ApipodTask;
+}
+
+function unwrapKlingTask(payload: KlingTask) {
+    if (!payload) throw new Error("可灵接口没有返回任务");
+    if (typeof payload.code === "number" && payload.code !== 0) throw new Error(payload.message || "可灵请求失败");
+    if (!payload.data) throw new Error("可灵接口没有返回任务");
+    return payload.data;
 }
 
 function apipodTaskError(task: ApipodTask) {
