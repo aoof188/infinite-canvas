@@ -70,7 +70,7 @@ const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 const VOLCENGINE_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
 const VOLCENGINE_ARK_PLAN_BASE_URL = "https://ark.cn-beijing.volces.com/api/plan/v3";
 const APIPOD_MODEL_SEED_VERSION = "2026-07-01";
-const ARK_MODEL_SEED_VERSION = "2026-07-01";
+const ARK_MODEL_SEED_VERSION = "2026-07-01-standard-video";
 // APIPod does not expose every multimodal model through /v1/models, so keep this local seed list for the config UI.
 const APIPOD_KNOWN_MODELS = [
     "gpt-image-2",
@@ -156,6 +156,11 @@ const ARK_KNOWN_MODELS = [
     "doubao-seedream-5-0-lite-260128",
     "doubao-seedream-4-5-251128",
     "doubao-seedream-4-0-250828",
+    "doubao-seedance-2-0-260128",
+    "doubao-seedance-2-0-fast-260128",
+    "doubao-seedance-1-0-pro-250528",
+    "doubao-seedance-1-0-lite-t2v-250428",
+    "doubao-seedance-1-0-lite-i2v-250428",
 ];
 const ARK_PLAN_KNOWN_MODELS = [
     "doubao-seedance-2-0-260128",
@@ -467,7 +472,7 @@ function normalizeChannels(config: AiConfig, seedArkChannels = false) {
             ...channel,
             id: channel.id || (index === 0 ? "default" : `channel-${index + 1}`),
             name: channel.name || (index === 0 ? "默认渠道" : `渠道 ${index + 1}`),
-            models: uniqueRawModels([...(channel.models || []), ...(isApipodChannel(channel) ? APIPOD_KNOWN_MODELS : [])]),
+            models: uniqueRawModels([...(channel.models || []), ...seedModelsForChannel(channel)]),
         }),
     );
     if (!channels.length) {
@@ -509,6 +514,12 @@ function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
     return apiFormat === "gemini" ? "gemini" : "openai";
 }
 
+function seedModelsForChannel(channel: Partial<ModelChannel>) {
+    if (isApipodChannel(channel)) return APIPOD_KNOWN_MODELS;
+    if (!isArkChannel(channel)) return [];
+    return isArkPlanChannel(channel) ? ARK_PLAN_KNOWN_MODELS : ARK_KNOWN_MODELS;
+}
+
 function isApipodChannel(channel: Partial<ModelChannel>) {
     const marker = `${channel.id || ""} ${channel.name || ""} ${channel.baseUrl || ""}`.toLowerCase();
     return marker.includes("apipod") || marker.includes("api.apipod.ai") || marker.includes("apipod-proxy");
@@ -517,6 +528,11 @@ function isApipodChannel(channel: Partial<ModelChannel>) {
 function isArkChannel(channel: Partial<ModelChannel>) {
     const marker = `${channel.id || ""} ${channel.name || ""} ${channel.baseUrl || ""}`.toLowerCase();
     return marker.includes("volcengine-ark") || marker.includes("火山方舟") || marker.includes("ark.cn-beijing.volces.com") || marker.includes("/ark-proxy");
+}
+
+function isArkPlanChannel(channel: Partial<ModelChannel>) {
+    const marker = `${channel.id || ""} ${channel.name || ""} ${channel.baseUrl || ""}`.toLowerCase();
+    return marker.includes("agent plan") || marker.includes("api/plan/v3");
 }
 
 function arkProxyBaseUrl(baseUrl: string) {
