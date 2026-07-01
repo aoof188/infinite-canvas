@@ -16,11 +16,21 @@ type SeedanceTask = {
     error?: { code?: string; message?: string } | null;
     content?: { video_url?: string; last_frame_url?: string } | null;
 };
+type ApipodTask = {
+    task_id?: string;
+    id?: string;
+    status?: "pending" | "processing" | "completed" | "failed" | "cancelled" | string;
+    result?: unknown;
+    code?: string | number;
+    message?: string;
+    msg?: string;
+    error?: { message?: string } | string | null;
+};
 type ApiEnvelope<T> = T | { code?: number; data?: T | null; msg?: string };
 type RequestOptions = { signal?: AbortSignal };
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
-export type VideoGenerationTask = { id: string; provider: "openai" | "seedance"; model: string };
+export type VideoGenerationTask = { id: string; provider: "openai" | "seedance" | "apipod"; model: string };
 export type VideoGenerationTaskState = { status: "pending" } | { status: "completed"; result: VideoGenerationResult } | { status: "failed"; error: string };
 
 function aiApiUrl(config: AiConfig, path: string) {
@@ -36,13 +46,13 @@ function aiHeaders(config: AiConfig, contentType?: string) {
 
 export async function requestVideoGeneration(config: AiConfig, prompt: string, references: ReferenceImage[] = [], videoReferences: ReferenceVideo[] = [], audioReferences: ReferenceAudio[] = [], options?: RequestOptions): Promise<VideoGenerationResult> {
     const task = await createVideoGenerationTask(config, prompt, references, videoReferences, audioReferences, options);
-    const delayMs = task.provider === "seedance" ? 5000 : 2500;
+    const delayMs = task.provider === "seedance" || task.provider === "apipod" ? 5000 : 2500;
     for (let attempt = 0; attempt < 120; attempt += 1) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const state = await pollVideoGenerationTask(config, task, options);
         if (state.status === "completed") return state.result;
         if (state.status === "failed") throw new Error(state.error);
-        if (attempt === 119) throw new Error(`${task.provider === "seedance" ? "Seedance " : ""}视频生成超时，请稍后重试`);
+        if (attempt === 119) throw new Error(`${task.provider === "seedance" ? "Seedance " : task.provider === "apipod" ? "APIPod " : ""}视频生成超时，请稍后重试`);
         await delay(delayMs, options?.signal);
     }
     throw new Error("视频生成超时，请稍后重试");
@@ -52,6 +62,9 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     const selectedModel = (config.model || config.videoModel).trim();
     const requestConfig = resolveModelRequestConfig(config, selectedModel);
     assertVideoConfig(requestConfig, requestConfig.model);
+    if (isApipodConfig(requestConfig)) {
+        return createApipodVideoTask(requestConfig, selectedModel, prompt, references, videoReferences, audioReferences, options);
+    }
     if (isSeedanceVideoConfig(requestConfig)) {
         return createSeedanceTask(requestConfig, selectedModel, prompt, references, videoReferences, audioReferences, options);
     }
@@ -64,6 +77,7 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
 export async function pollVideoGenerationTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     const requestConfig = resolveModelRequestConfig(config, task.model);
     assertVideoConfig(requestConfig, requestConfig.model);
+    if (task.provider === "apipod") return pollApipodVideoTask(requestConfig, task, options);
     return task.provider === "seedance" ? pollSeedanceTask(requestConfig, task, options) : pollOpenAIVideoTask(requestConfig, task, options);
 }
 
@@ -134,6 +148,37 @@ async function createSeedanceTask(config: AiConfig, model: string, prompt: strin
     }
 }
 
+async function createApipodVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    const imageUrls = await Promise.all(references.map((image) => imageToDataUrl(image)));
+    const videoUrls = await Promise.all(videoReferences.map(resolveSeedanceVideoUrl));
+    const audioUrls = await Promise.all(audioReferences.map(resolveSeedanceAudioUrl));
+    const requestPrompt = buildSeedancePromptText(prompt, references, videoReferences, audioReferences);
+    if (!requestPrompt && !imageUrls.length && !videoUrls.length && !audioUrls.length) throw new Error("请输入视频提示词，或连接参考图片/视频/音频");
+    const payload = {
+        model: modelOptionName(model),
+        prompt: requestPrompt || prompt,
+        aspect_ratio: normalizeSeedanceRatio(config.size),
+        resolution: normalizeSeedanceResolution(config.vquality, modelOptionName(model)),
+        duration: normalizeSeedanceDuration(config.videoSeconds),
+        generate_audio: boolConfig(config.videoGenerateAudio, true),
+        return_last_frame: false,
+        watermark: boolConfig(config.videoWatermark, false),
+        web_search: false,
+        ...(imageUrls.length ? { image_urls: imageUrls } : {}),
+        ...(videoUrls.length ? { video_urls: videoUrls } : {}),
+        ...(audioUrls.length ? { audio_urls: audioUrls } : {}),
+    };
+
+    try {
+        const created = unwrapApipodTask((await axios.post<ApiEnvelope<ApipodTask>>(aiApiUrl(config, "/videos/generations"), payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data);
+        const taskId = created.task_id || created.id;
+        if (!taskId) throw new Error("APIPod 接口没有返回任务 ID");
+        return { id: taskId, provider: "apipod", model };
+    } catch (error) {
+        throw new Error(readAxiosError(error, "APIPod 视频任务创建失败"));
+    }
+}
+
 async function pollSeedanceTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     try {
         const state = unwrapSeedanceTask((await axios.get<ApiEnvelope<SeedanceTask>>(seedanceApiUrl(config, task.id), { headers: aiHeaders(config), signal: options?.signal })).data);
@@ -146,6 +191,21 @@ async function pollSeedanceTask(config: AiConfig, task: VideoGenerationTask, opt
         return { status: "pending" };
     } catch (error) {
         throw new Error(readAxiosError(error, "Seedance 任务查询失败"));
+    }
+}
+
+async function pollApipodVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
+    try {
+        const state = unwrapApipodTask((await axios.get<ApiEnvelope<ApipodTask>>(aiApiUrl(config, `/videos/status/${encodeURIComponent(task.id)}`), { headers: aiHeaders(config), signal: options?.signal })).data);
+        if (state.status === "completed") {
+            const url = apipodResultUrl(state.result);
+            if (!url) return { status: "failed", error: "APIPod 任务成功但没有返回视频 URL" };
+            return { status: "completed", result: await videoResultFromUrl(url, options) };
+        }
+        if (state.status === "failed" || state.status === "cancelled") return { status: "failed", error: apipodTaskError(state) || `APIPod 视频生成${state.status === "cancelled" ? "已取消" : "失败"}` };
+        return { status: "pending" };
+    } catch (error) {
+        throw new Error(readAxiosError(error, "APIPod 视频任务查询失败"));
     }
 }
 
@@ -173,6 +233,11 @@ function assertSeedanceAudioReferences(audioReferences: ReferenceAudio[]) {
 
 function seedanceApiUrl(config: AiConfig, taskId?: string) {
     return buildApiUrl(config.baseUrl, `/contents/generations/tasks${taskId ? `/${encodeURIComponent(taskId)}` : ""}`);
+}
+
+function isApipodConfig(config: Pick<AiConfig, "baseUrl">) {
+    const value = config.baseUrl.trim().toLowerCase();
+    return value.includes("apipod") || value.includes("/apipod-proxy");
 }
 
 async function buildSeedanceContent(config: AiConfig, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[]) {
@@ -262,6 +327,38 @@ function unwrapSeedanceTask(payload: ApiEnvelope<SeedanceTask>) {
     return unwrapEnvelope(payload, "Seedance 接口没有返回任务");
 }
 
+function unwrapApipodTask(payload: ApiEnvelope<ApipodTask>) {
+    if (!payload) throw new Error("APIPod 接口没有返回任务");
+    if (typeof payload === "object" && "code" in payload && typeof payload.code === "number") {
+        if (payload.code !== 0 && payload.code !== 200) throw new Error("msg" in payload && payload.msg ? payload.msg : "APIPod 请求失败");
+        if ("data" in payload && payload.data) return payload.data;
+        throw new Error("APIPod 接口没有返回任务");
+    }
+    return payload as ApipodTask;
+}
+
+function apipodTaskError(task: ApipodTask) {
+    if (typeof task.error === "string") return task.error;
+    return task.error?.message || task.message || task.msg || (task.code ? String(task.code) : "");
+}
+
+function apipodResultUrl(result: unknown): string {
+    if (typeof result === "string") return result;
+    if (Array.isArray(result)) {
+        for (const item of result) {
+            const url = apipodResultUrl(item);
+            if (url) return url;
+        }
+    }
+    if (result && typeof result === "object") {
+        const item = result as Record<string, unknown>;
+        for (const key of ["url", "video_url", "result_url", "download_url"]) {
+            if (typeof item[key] === "string" && item[key]) return item[key];
+        }
+    }
+    return "";
+}
+
 function unwrapEnvelope<T>(payload: ApiEnvelope<T>, emptyMessage: string): T {
     if (!payload) throw new Error(emptyMessage);
     if (typeof payload === "object" && "code" in payload && typeof payload.code === "number") {
@@ -274,9 +371,9 @@ function unwrapEnvelope<T>(payload: ApiEnvelope<T>, emptyMessage: string): T {
 
 function readAxiosError(error: unknown, fallback: string) {
     if (axios.isCancel(error)) return "请求已取消";
-    if (axios.isAxiosError<{ error?: { message?: string }; msg?: string; code?: number }>(error)) {
+    if (axios.isAxiosError<{ error?: { message?: string }; msg?: string; message?: string; code?: number }>(error)) {
         const responseData = error.response?.data;
-        return responseData?.msg || responseData?.error?.message || statusMessage(error.response?.status, fallback);
+        return responseData?.msg || responseData?.message || responseData?.error?.message || statusMessage(error.response?.status, fallback);
     }
     if (error instanceof DOMException && error.name === "AbortError") return "请求已取消";
     return error instanceof Error ? error.message : fallback;
