@@ -122,12 +122,13 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
 }
 
 async function createSeedanceTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], options?: RequestOptions): Promise<VideoGenerationTask> {
-    if (audioReferences.length && !references.length && !videoReferences.length) {
+    const requestReferences = videoReferencesForModel(model, references, videoReferences, audioReferences);
+    if (requestReferences.audioReferences.length && !requestReferences.references.length && !requestReferences.videoReferences.length) {
         throw new Error("Seedance 参考音频不能单独使用，请同时添加参考图或参考视频");
     }
-    assertSeedanceVideoReferences(videoReferences);
-    assertSeedanceAudioReferences(audioReferences);
-    const content = await buildSeedanceContent(config, prompt, references, videoReferences, audioReferences);
+    assertSeedanceVideoReferences(requestReferences.videoReferences);
+    assertSeedanceAudioReferences(requestReferences.audioReferences);
+    const content = await buildSeedanceContent(config, prompt, requestReferences.references, requestReferences.videoReferences, requestReferences.audioReferences);
     if (!content.length) throw new Error("请输入视频提示词，或连接参考图片/视频/音频");
     const payload = {
         model: modelOptionName(model),
@@ -149,10 +150,11 @@ async function createSeedanceTask(config: AiConfig, model: string, prompt: strin
 }
 
 async function createApipodVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], options?: RequestOptions): Promise<VideoGenerationTask> {
-    const imageUrls = await Promise.all(references.map((image) => imageToDataUrl(image)));
-    const videoUrls = await Promise.all(videoReferences.map(resolveSeedanceVideoUrl));
-    const audioUrls = await Promise.all(audioReferences.map(resolveSeedanceAudioUrl));
-    const requestPrompt = buildSeedancePromptText(prompt, references, videoReferences, audioReferences);
+    const requestReferences = videoReferencesForModel(model, references, videoReferences, audioReferences);
+    const imageUrls = await Promise.all(requestReferences.references.map((image) => imageToDataUrl(image)));
+    const videoUrls = await Promise.all(requestReferences.videoReferences.map(resolveSeedanceVideoUrl));
+    const audioUrls = await Promise.all(requestReferences.audioReferences.map(resolveSeedanceAudioUrl));
+    const requestPrompt = buildSeedancePromptText(prompt, requestReferences.references, requestReferences.videoReferences, requestReferences.audioReferences);
     if (!requestPrompt && !imageUrls.length && !videoUrls.length && !audioUrls.length) throw new Error("请输入视频提示词，或连接参考图片/视频/音频");
     const payload = {
         model: modelOptionName(model),
@@ -177,6 +179,16 @@ async function createApipodVideoTask(config: AiConfig, model: string, prompt: st
     } catch (error) {
         throw new Error(readAxiosError(error, "APIPod 视频任务创建失败"));
     }
+}
+
+function videoReferencesForModel(model: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[]) {
+    if (isTextToVideoModel(model)) return { references: [], videoReferences: [], audioReferences: [] };
+    return { references, videoReferences, audioReferences };
+}
+
+function isTextToVideoModel(model: string) {
+    const value = modelOptionName(model).toLowerCase();
+    return value.includes("t2v") && !value.includes("i2v") && !value.includes("r2v");
 }
 
 async function pollSeedanceTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
