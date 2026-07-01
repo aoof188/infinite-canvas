@@ -910,6 +910,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
 export async function requestImageTaskResult(config: AiConfig, taskId: string, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
     try {
+        options?.onImageTask?.(taskId);
         return await pollImageTask(requestConfig, taskId, options);
     } catch (error) {
         if (isImageTaskPendingError(error)) throw error;

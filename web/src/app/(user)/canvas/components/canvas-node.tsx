@@ -362,10 +362,39 @@ function LoadingContent({ theme }: Pick<NodeContentRendererProps, "theme">) {
 }
 
 function ErrorContent({ node, theme, onRetry }: Pick<NodeContentRendererProps, "node" | "theme" | "onRetry">) {
+    const [taskIdInput, setTaskIdInput] = useState("");
+    const manualTaskId = taskIdInput.trim();
     return (
         <div className="flex max-w-[260px] flex-col items-center gap-3 px-5 text-center">
             <div className="text-xs leading-5 text-red-300">{node.metadata?.errorDetails || "生成失败"}</div>
             {node.metadata?.imageTaskId ? <div className="max-w-full truncate text-[10px]" style={{ color: theme.node.muted }}>任务 ID：{node.metadata.imageTaskId}</div> : null}
+            {node.type === CanvasNodeType.Image && !node.metadata?.imageTaskId ? (
+                <div className="flex w-full items-center gap-1.5">
+                    <input
+                        className="min-w-0 flex-1 rounded-full border bg-transparent px-3 py-1 text-[10px] outline-none"
+                        style={{ borderColor: theme.toolbar.border, color: theme.node.text }}
+                        placeholder="APIPod 任务 ID"
+                        value={taskIdInput}
+                        onChange={(event) => setTaskIdInput(event.target.value)}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onPointerDown={(event) => event.stopPropagation()}
+                    />
+                    <button
+                        type="button"
+                        className="shrink-0 rounded-full border px-2 py-1 text-[10px] transition disabled:opacity-40"
+                        style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                        disabled={!manualTaskId}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            if (!manualTaskId) return;
+                            onRetry?.({ ...node, metadata: { ...node.metadata, imageTaskId: manualTaskId, imageTaskStatus: "timeout" } });
+                        }}
+                        onMouseDown={(event) => event.stopPropagation()}
+                    >
+                        拉取
+                    </button>
+                </div>
+            ) : null}
             <button
                 type="button"
                 className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02]"
