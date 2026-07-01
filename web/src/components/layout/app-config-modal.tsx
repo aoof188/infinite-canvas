@@ -2,7 +2,7 @@
 
 import { App, Button, Form, Input, Modal, Progress, Segmented, Select, Tabs } from "antd";
 import { CircleAlert, Cloud, Plus, RefreshCw, Trash2, Wifi } from "lucide-react";
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { ModelPicker } from "@/components/model-picker";
 import { fetchChannelModels } from "@/services/api/image";
@@ -76,9 +76,22 @@ export function AppConfigModal() {
     const modelOptions = config.models.map((model) => ({ label: modelOptionLabel(config, model), value: model }));
     const webdavReady = Boolean(webdav.url.trim());
 
-    const saveConfig = (nextConfig: AiConfig) => {
+    const saveConfig = useCallback((nextConfig: AiConfig) => {
         (Object.keys(nextConfig) as Array<keyof AiConfig>).forEach((key) => updateConfig(key, nextConfig[key]));
-    };
+    }, [updateConfig]);
+
+    useEffect(() => {
+        if (!isConfigOpen) return;
+        let changed = false;
+        const channels = config.channels.map((channel) => {
+            if (channel.models.length) return channel;
+            const seedModels = seedModelsForChannel(channel);
+            if (!seedModels.length) return channel;
+            changed = true;
+            return { ...channel, models: uniqueModels(seedModels) };
+        });
+        if (changed) saveConfig(withChannels(config, channels));
+    }, [config, isConfigOpen, saveConfig]);
 
     const finishConfig = () => {
         const ready = config.channels.some((channel) => channel.baseUrl.trim() && channel.apiKey.trim() && channel.models.length);
