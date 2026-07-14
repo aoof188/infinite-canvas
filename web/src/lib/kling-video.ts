@@ -24,5 +24,5 @@ export function normalizeKlingDuration(modelId: string, value: string) {
 
 export function modelSupportsKlingSound(modelId: string) {
     const normalized = modelId.replace(/\./g, "-");
-    return normalized.startsWith("kling-v2-6-") || normalized.startsWith("kling-v3-0-");
+    return normalized.startsWith("kling-v3-0-");
 }

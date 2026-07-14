@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 
-import { defaultConfig, encodeChannelModel, resolveModelRequestConfig } from "./use-config-store";
+import { buildApiUrl, defaultConfig, encodeChannelModel, resolveModelRequestConfig } from "./use-config-store";
+
+test("does not duplicate a version already present in the request path", () => {
+    expect(buildApiUrl("/kling-proxy/api-beijing.klingai.com", "/v1/videos/text2video")).toBe(
+        "/kling-proxy/api-beijing.klingai.com/v1/videos/text2video",
+    );
+});
 
 test("reuses a configured Kling API key across Kling channels", () => {
     const config = {
