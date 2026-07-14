@@ -505,6 +505,9 @@ export function resolveModelRequestConfig(config: AiConfig, value: string) {
 
 function apiKeyForChannel(config: AiConfig, channel: ModelChannel) {
     if (channel.apiKey.trim()) return channel.apiKey;
+    if (isKlingChannel(channel)) {
+        return config.channels.find((item) => item.id !== channel.id && isKlingChannel(item) && item.apiKey.trim())?.apiKey || "";
+    }
     if (isApipodChannel(channel)) return channel.apiKey;
     if (!isArkChannel(channel)) return channel.apiKey;
     const sharedArkKey = config.channels.find((item) => item.id !== channel.id && isArkChannel(item) && item.apiKey.trim())?.apiKey;
@@ -596,7 +599,9 @@ function klingProxyBaseUrl(baseUrl: string) {
     if (isKlingProxyBaseUrl(baseUrl)) return baseUrl.trim().replace(/\/+$/, "");
     try {
         const url = new URL(baseUrl.trim());
-        return isKlingBaseUrl(baseUrl) ? `/kling-proxy/${encodeURIComponent(url.hostname)}` : "/kling-proxy";
+        if (!isKlingBaseUrl(baseUrl)) return "/kling-proxy";
+        const hostname = url.hostname.toLowerCase() === "api-singapore.klingai.com" ? "api-beijing.klingai.com" : url.hostname;
+        return `/kling-proxy/${encodeURIComponent(hostname)}`;
     } catch {
         return "/kling-proxy";
     }
