@@ -1,6 +1,4 @@
-"use client";
-
-import { App, Button, Form, Input, Modal, Progress, Segmented, Select, Tabs } from "antd";
+import { App, Button, Form, Input, Modal, Progress, Select, Tabs } from "antd";
 import { CircleAlert, Cloud, Plus, RefreshCw, Trash2, Wifi } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
@@ -9,7 +7,8 @@ import { fetchChannelModels } from "@/services/api/image";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
-import { createModelChannel, defaultBaseUrlForApiFormat, filterModelsByCapability, modelOptionLabel, modelOptionsFromChannels, normalizeModelOptionValue, seedModelsForChannel, useConfigStore, type AiConfig, type ApiCallFormat, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { createModelChannel, defaultBaseUrlForApiFormat, filterModelsByCapability, modelOptionLabel, modelOptionsFromChannels, normalizeModelOptionValue, useConfigStore, type AiConfig, type ApiCallFormat, type ConfigTabKey, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { seedModelsForChannel } from "@/stores/use-config-store";
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -57,9 +56,9 @@ function createWebdavDomainProgress(): Record<AppSyncDomainKey, WebdavDomainProg
     );
 }
 
-export function AppConfigModal() {
+export function AppConfigPanel({ showDoneButton = false, initialTab = "channels" }: { showDoneButton?: boolean; initialTab?: ConfigTabKey }) {
     const { message } = App.useApp();
-    const [activeTab, setActiveTab] = useState("channels");
+    const [activeTab, setActiveTab] = useState<ConfigTabKey>(initialTab);
     const [loadingChannelId, setLoadingChannelId] = useState("");
     const [testingWebdav, setTestingWebdav] = useState(false);
     const [syncingWebdav, setSyncingWebdav] = useState(false);
@@ -69,19 +68,18 @@ export function AppConfigModal() {
     const webdav = useConfigStore((state) => state.webdav);
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const updateWebdavConfig = useConfigStore((state) => state.updateWebdavConfig);
-    const isConfigOpen = useConfigStore((state) => state.isConfigOpen);
     const shouldPromptContinue = useConfigStore((state) => state.shouldPromptContinue);
     const setConfigDialogOpen = useConfigStore((state) => state.setConfigDialogOpen);
     const clearPromptContinue = useConfigStore((state) => state.clearPromptContinue);
     const modelOptions = config.models.map((model) => ({ label: modelOptionLabel(config, model), value: model }));
     const webdavReady = Boolean(webdav.url.trim());
+    useEffect(() => setActiveTab(initialTab), [initialTab]);
 
     const saveConfig = useCallback((nextConfig: AiConfig) => {
         (Object.keys(nextConfig) as Array<keyof AiConfig>).forEach((key) => updateConfig(key, nextConfig[key]));
     }, [updateConfig]);
 
     useEffect(() => {
-        if (!isConfigOpen) return;
         let changed = false;
         const channels = config.channels.map((channel) => {
             if (channel.models.length) return channel;
@@ -91,7 +89,7 @@ export function AppConfigModal() {
             return { ...channel, models: uniqueModels(seedModels) };
         });
         if (changed) saveConfig(withChannels(config, channels));
-    }, [config, isConfigOpen, saveConfig]);
+    }, [config, saveConfig]);
 
     const finishConfig = () => {
         const ready = config.channels.some((channel) => channel.baseUrl.trim() && channel.apiKey.trim() && channel.models.length);
@@ -307,27 +305,10 @@ export function AppConfigModal() {
     };
 
     return (
-        <Modal
-            title={
-                <div>
-                    <div className="text-lg font-semibold">配置与用户偏好</div>
-                    <div className="mt-1 text-xs font-normal text-stone-500">渠道聚合、模型选择和同步偏好</div>
-                </div>
-            }
-            open={isConfigOpen}
-            width={980}
-            centered
-            onCancel={() => setConfigDialogOpen(false)}
-            styles={{ body: { maxHeight: "72vh", overflowY: "auto", paddingRight: 12 } }}
-            footer={
-                <Button type="primary" onClick={finishConfig}>
-                    完成
-                </Button>
-            }
-        >
+        <>
             <Tabs
                 activeKey={activeTab}
-                onChange={setActiveTab}
+                onChange={(key) => setActiveTab(key as ConfigTabKey)}
                 items={[
                     {
                         key: "channels",
@@ -484,22 +465,11 @@ export function AppConfigModal() {
                                                 <Cloud className="size-4" />
                                                 WebDAV 同步
                                             </div>
-                                            <div className="mt-1 text-xs text-stone-500">同步画布、我的素材、生成记录和本地媒体文件，不包含 AI API Key；服务不支持 CORS 时可走 Next.js 转发。</div>
+                                            <div className="mt-1 text-xs text-stone-500">同步画布、我的素材、生成记录和本地媒体文件，不包含 AI API Key；浏览器会直接连接 WebDAV 服务。</div>
                                         </div>
                                         <div className="text-xs text-stone-500">{webdav.lastSyncedAt ? `上次同步 ${formatWebdavTime(webdav.lastSyncedAt)}` : "尚未同步"}</div>
                                     </div>
                                     <div className="grid gap-4 md:grid-cols-2">
-                                        <Form.Item label="连接方式" className="mb-4 md:col-span-2">
-                                            <Segmented
-                                                block
-                                                value={webdav.proxyMode}
-                                                onChange={(value) => updateWebdavConfig("proxyMode", value as typeof webdav.proxyMode)}
-                                                options={[
-                                                    { label: "前端直连", value: "direct" },
-                                                    { label: "Next.js 转发", value: "nextjs" },
-                                                ]}
-                                            />
-                                        </Form.Item>
                                         <Form.Item label="WebDAV 地址" className="mb-4">
                                             <Input value={webdav.url} placeholder="https://nas.example.com/webdav" onChange={(event) => updateWebdavConfig("url", event.target.value)} />
                                         </Form.Item>
@@ -529,6 +499,37 @@ export function AppConfigModal() {
                     },
                 ]}
             />
+            {showDoneButton ? (
+                <div className="mt-4 flex justify-end">
+                    <Button type="primary" onClick={finishConfig}>
+                        完成
+                    </Button>
+                </div>
+            ) : null}
+        </>
+    );
+}
+
+export function AppConfigModal() {
+    const isConfigOpen = useConfigStore((state) => state.isConfigOpen);
+    const configTab = useConfigStore((state) => state.configTab);
+    const setConfigDialogOpen = useConfigStore((state) => state.setConfigDialogOpen);
+    return (
+        <Modal
+            title={
+                <div>
+                    <div className="text-lg font-semibold">配置与用户偏好</div>
+                    <div className="mt-1 text-xs font-normal text-stone-500">渠道聚合、模型选择和同步偏好</div>
+                </div>
+            }
+            open={isConfigOpen}
+            width={980}
+            centered
+            onCancel={() => setConfigDialogOpen(false)}
+            styles={{ body: { maxHeight: "72vh", overflowY: "auto", paddingRight: 12 } }}
+            footer={null}
+        >
+            <AppConfigPanel showDoneButton initialTab={configTab} />
         </Modal>
     );
 }

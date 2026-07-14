@@ -12,19 +12,19 @@ export type AiTextMessage = {
     content: string | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
 };
 
-export type ResponseToolCall = {
+type ResponseToolCall = {
     id: string;
     type: "function";
     function: { name: string; arguments: string };
     thoughtSignature?: string;
 };
 
-export type ResponseInputMessage =
+type ResponseInputMessage =
     | AiTextMessage
     | { type: "function_call"; call_id: string; name: string; arguments: string; thoughtSignature?: string }
     | { role: "tool"; tool_call_id: string; content: string };
 
-export type ResponseFunctionTool = {
+type ResponseFunctionTool = {
     type: "function";
     function: {
         name: string;
@@ -34,7 +34,7 @@ export type ResponseFunctionTool = {
     };
 };
 
-export type ToolResponseResult = {
+type ToolResponseResult = {
     content: string;
     toolCalls: ResponseToolCall[];
 };
@@ -148,6 +148,9 @@ const IMAGE_OUTPUT_FORMAT = "png";
 const IMAGE_TASK_FAST_POLLS = 12;
 const IMAGE_TASK_DEFAULT_POLLS = 360;
 
+const GEMINI_SUPPORTED_RATIOS = ["1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "8:1", "9:16", "16:9", "21:9"];
+const GEMINI_IMAGE_SIZE_BY_QUALITY: Record<string, string> = { low: "1K", medium: "2K", high: "4K", standard: "1K", hd: "2K" };
+
 function normalizeQuality(quality: string) {
     const value = quality.trim().toLowerCase();
     const normalized = QUALITY_ALIASES[value] || value;
@@ -179,14 +182,19 @@ function resolveSize(quality: string | undefined, ratio: string): string {
     return `${width}x${height}`;
 }
 
-function parseImageRatio(value: string) {
+function parseRatioValue(value: string) {
     const parts = value.split(":");
     if (parts.length !== 2) throw new Error("图像尺寸格式不支持，请使用 auto、9:16 或 1024x1024");
     const w = Number(parts[0]);
     const h = Number(parts[1]);
     if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) throw new Error("图像比例必须是正数，例如 9:16");
-    if (Math.max(w, h) / Math.min(w, h) > IMAGE_MAX_RATIO) throw new Error("图像宽高比不能超过 3:1，请调整尺寸");
     return { width: w, height: h };
+}
+
+function parseImageRatio(value: string) {
+    const ratio = parseRatioValue(value);
+    if (Math.max(ratio.width, ratio.height) / Math.min(ratio.width, ratio.height) > IMAGE_MAX_RATIO) throw new Error("图像宽高比不能超过 3:1，请调整尺寸");
+    return ratio;
 }
 
 function parseImageDimensions(value: string) {
@@ -253,6 +261,42 @@ function apipodImageOptions(config: AiConfig) {
         ...(quality ? (isWanImage ? { size: quality } : { quality }) : {}),
         ...(isWanImage ? { thinking_mode: true, watermark: false } : {}),
     };
+}
+
+function resolveGeminiImageConfig(config: AiConfig) {
+    const value = config.size.trim();
+    const dimensions = parseImageDimensions(value);
+    const ratio = dimensions ? `${dimensions.width}:${dimensions.height}` : value;
+    const aspectRatio = value && value.toLowerCase() !== "auto" ? closestGeminiAspectRatio(ratio) : undefined;
+    const imageSize = supportsGeminiImageSize(config.model) ? resolveGeminiImageSize(config.quality, dimensions) : undefined;
+    const image = { ...(aspectRatio ? { aspectRatio } : {}), ...(imageSize ? { imageSize } : {}) };
+    return Object.keys(image).length ? { responseFormat: { image } } : {};
+}
+
+function closestGeminiAspectRatio(value: string) {
+    const ratio = parseImageRatio(value);
+    const target = ratio.width / ratio.height;
+    return GEMINI_SUPPORTED_RATIOS.reduce((best, item) => {
+        const current = parseRatioValue(item);
+        const bestRatio = parseRatioValue(best);
+        return Math.abs(current.width / current.height - target) < Math.abs(bestRatio.width / bestRatio.height - target) ? item : best;
+    });
+}
+
+function resolveGeminiImageSize(quality: string, dimensions: { width: number; height: number } | null) {
+    const normalizedQuality = normalizeQuality(quality);
+    if (normalizedQuality) return GEMINI_IMAGE_SIZE_BY_QUALITY[normalizedQuality];
+    if (!dimensions) return undefined;
+    const edge = Math.max(dimensions.width, dimensions.height);
+    if (edge <= 768) return "512";
+    if (edge <= 1536) return "1K";
+    if (edge <= 3072) return "2K";
+    return "4K";
+}
+
+function supportsGeminiImageSize(model: string) {
+    const value = model.toLowerCase();
+    return value.includes("gemini-3") || value.includes("3.1") || value.includes("3-pro");
 }
 
 function resolveImageDataUrl(item: Record<string, unknown>) {
@@ -789,7 +833,7 @@ async function requestGeminiImagesOnce(config: AiConfig, prompt: string, referen
     const response = await axios.post<GeminiPayload>(
         geminiApiUrl(config, "generateContent"),
         {
-            ...toGeminiBody(config, [{ role: "user", content: prompt }], { generationConfig: { responseModalities: ["TEXT", "IMAGE"] } }),
+            ...toGeminiBody(config, [{ role: "user", content: prompt }], { generationConfig: { responseModalities: ["TEXT", "IMAGE"], ...resolveGeminiImageConfig(config) } }),
             contents: [{ role: "user", parts }],
         },
         { headers: geminiHeaders(config), signal: options?.signal },
@@ -932,24 +976,6 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
         }, onDelta, options)).content || "没有返回内容";
         if (answer === "没有返回内容") onDelta(answer);
         return answer;
-    } catch (error) {
-        throw new Error(readAxiosError(error, "请求失败"));
-    }
-}
-
-export async function requestToolResponse(config: AiConfig, messages: ResponseInputMessage[], tools: ResponseFunctionTool[], toolChoice: ToolChoice = "auto", onDelta?: (text: string) => void, options?: RequestOptions): Promise<ToolResponseResult> {
-    const requestConfig = resolveModelRequestConfig(config, config.model || config.textModel);
-    try {
-        if (requestConfig.apiFormat === "gemini") {
-            return await requestGeminiStreamingResponse(requestConfig, toGeminiBody(requestConfig, messages, toGeminiToolOptions(tools, toolChoice)), onDelta, options);
-        }
-        return await requestStreamingResponse(requestConfig, {
-            model: requestConfig.model,
-            input: toResponseInput(withSystemMessage(requestConfig, messages)),
-            tools: tools.map(toResponseTool),
-            tool_choice: toolChoice,
-            parallel_tool_calls: false,
-        }, onDelta, options);
     } catch (error) {
         throw new Error(readAxiosError(error, "请求失败"));
     }
