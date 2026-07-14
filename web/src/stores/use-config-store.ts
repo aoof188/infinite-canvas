@@ -68,10 +68,10 @@ const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 const VOLCENGINE_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
 const VOLCENGINE_ARK_PLAN_BASE_URL = "https://ark.cn-beijing.volces.com/api/plan/v3";
-const KLING_BASE_URL = "https://api-singapore.klingai.com";
+const KLING_BASE_URL = "https://api-beijing.klingai.com";
 const APIPOD_MODEL_SEED_VERSION = "2026-07-01";
 const ARK_MODEL_SEED_VERSION = "2026-07-01-standard-video";
-const KLING_MODEL_SEED_VERSION = "2026-07-01-video-expanded";
+const KLING_MODEL_SEED_VERSION = "2026-07-14-api-key-v1";
 // APIPod does not expose every multimodal model through /v1/models, so keep this local seed list for the config UI.
 const APIPOD_KNOWN_MODELS = [
     "gpt-image-2",

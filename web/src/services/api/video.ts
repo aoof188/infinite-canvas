@@ -1,6 +1,7 @@
 import axios from "axios";
 
 import { dataUrlToFile } from "@/lib/image-utils";
+import { klingApiModelName, klingEndpoint, modelSupportsKlingSound, normalizeKlingDuration } from "@/lib/kling-video";
 import { modelAllowsVideoReferenceMaterial } from "@/lib/model-adapter";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
@@ -315,7 +316,7 @@ function isKlingConfig(config: Pick<AiConfig, "baseUrl">) {
 
 async function buildKlingPayload(config: AiConfig, modelId: string, mode: "t2v" | "i2v" | "motion-control", prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[]) {
     const modelName = klingApiModelName(modelId, mode);
-    const duration = normalizeKlingDuration(config.videoSeconds);
+    const duration = normalizeKlingDuration(modelId, config.videoSeconds);
     const common = klingCommonOptions(config, modelId);
     if (mode === "t2v") {
         if (references.length || videoReferences.length) throw new Error("可灵文生视频模型不支持参考素材，请切换到 i2v 或 motion-control 模型");
@@ -342,17 +343,6 @@ function klingVideoMode(modelId: string): "t2v" | "i2v" | "motion-control" {
     throw new Error("可灵模型名称需以 -t2v、-i2v 或 -motion-control 结尾");
 }
 
-function klingEndpoint(mode: "t2v" | "i2v" | "motion-control", referenceImageCount: number) {
-    if (mode === "t2v") return "/videos/text2video";
-    if (mode === "motion-control") return "/videos/motion-control";
-    return referenceImageCount > 1 ? "/videos/multi-image2video" : "/videos/image2video";
-}
-
-function klingApiModelName(modelId: string, mode: "t2v" | "i2v" | "motion-control") {
-    const suffix = mode === "motion-control" ? "-motion-control" : `-${mode}`;
-    return modelId.slice(0, -suffix.length).replace(/\.0$/, "").replace(/\./g, "-");
-}
-
 async function klingImageValue(config: AiConfig, image: ReferenceImage) {
     const directUrl = image.url || image.dataUrl;
     if (isPublicMediaUrl(directUrl)) return directUrl;
@@ -366,19 +356,11 @@ function normalizeKlingAspectRatio(value: string) {
     return ["16:9", "9:16", "1:1"].includes(ratio) ? ratio : "16:9";
 }
 
-function normalizeKlingDuration(value: string) {
-    return Number(value) >= 10 ? "10" : "5";
-}
-
 function klingCommonOptions(config: AiConfig, modelId: string) {
     return {
         ...(modelSupportsKlingSound(modelId) ? { sound: boolConfig(config.videoGenerateAudio, true) ? "on" : "off" } : {}),
         watermark_info: { enabled: boolConfig(config.videoWatermark, false) },
     };
-}
-
-function modelSupportsKlingSound(modelId: string) {
-    return /kling-v(2\.6|3\.0)/.test(modelId);
 }
 
 async function buildSeedanceContent(config: AiConfig, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[]) {
